@@ -1,5 +1,3 @@
-name: SMART SCANNER
-
 on:
   schedule:
     # 평일 오전 7:00 KST (전일 22:00 UTC) — 전체 스캔
