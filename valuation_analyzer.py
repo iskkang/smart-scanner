@@ -406,11 +406,19 @@ def score_valuation(ticker: str) -> Optional[dict]:
 
     is_bubble, bubble_reason = detect_bubble(val_data, sector)
 
+    # target_gap_pct 직접 계산해서 저장 (notifier 호환)
+    target_gap_pct = None
+    current = val_data.get("current_price")
+    target  = val_data.get("target_mean_price")
+    if current and target and current > 0:
+        target_gap_pct = round((target - current) / current * 100, 2)
+
     return {
         **val_data,
         "val_score": max(ms + cs, 0),
         "signals": msi + csi,
         "warnings": mw + cw,
+        "target_gap_pct": target_gap_pct,
         "pass": not is_bubble,
         "fail_reason": bubble_reason if is_bubble else None,
     }
