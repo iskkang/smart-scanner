@@ -98,16 +98,21 @@ def score_valuation(ticker: str) -> Optional[dict]:
     밸류에이션 종합 점수 산출.
 
     PE Z-score 점수:
-      -1.5σ 이하: +35
-      -1.0σ 이하: +25
-      +1.5σ 이상: 탈락 (고평가)
+      -1.5σ 이하: +30
+      -1.0σ 이하: +20
+      +1.5σ ~ +2.5σ: 참고 경고만 (즉시 탈락 없음 — 현재 EPS 기반 역산은 사이클주에서 왜곡 심함)
+      +2.5σ 초과: 경고 (HIGH_OVERVALUED)
 
     목표가 괴리율 점수:
-      40% 이상: +35
-      25% 이상: +25
-      현재가 > 목표가: 감점, 탈락 후보
+      35% 이상:  +35
+      20% 이상:  +25
+      10% 이상:  +15  ← 신규 (눌림목 구간 적정 괴리)
+       0% 이상:  +5   ← 신규 (상승 여지 있음)
+      현재가 > 목표가: -10 경고
 
-    통과: 점수 30 이상 + 경고 1개 이하
+    데이터 부족 (PE·목표가 모두 없음): 경고만 추가 후 통과 (차트·기관 필터에 위임)
+
+    통과: 점수 15 이상 + 즉시탈락 경고(HARD_FAIL) 없음
     """
     val_data = fetch_valuation_data(ticker)
     if not val_data:
@@ -116,6 +121,7 @@ def score_valuation(ticker: str) -> Optional[dict]:
     score = 0
     warnings = []
     details = {}
+    hard_fail = False
 
     # ── PE Z-score ──
     pe_result = calc_pe_zscore(ticker, val_data.get("trailing_eps"))
@@ -123,16 +129,19 @@ def score_valuation(ticker: str) -> Optional[dict]:
         details["pe_zscore"] = pe_result
         z = pe_result["pe_zscore"]
 
-        if z >= 1.5:
-            # 즉시 탈락 → 경고로 변경: 목표가 괴리율 등 다른 지표로 보완 판단
-            warnings.append("PE_Z_HIGH_OVERVALUED")
-            details["pe_zscore_verdict"] = "고평가 주의 (경고)"
+        if z > 2.5:
+            # 극단 고평가만 경고 (즉시 탈락은 없음 — 사이클주 EPS 왜곡 대응)
+            warnings.append("PE_Z_EXTREME_OVERVALUED")
+            details["pe_zscore_verdict"] = "극단 고평가 주의 (경고)"
+        elif z >= 1.5:
+            # 고평가 범위이나 사이클주 특성상 경고만
+            details["pe_zscore_verdict"] = "고평가 구간 (경고 없음 — 사이클 보정)"
         elif z <= -1.5:
-            score += 35
-            details["pe_zscore_verdict"] = "극단 저평가 (+35)"
+            score += 30
+            details["pe_zscore_verdict"] = "극단 저평가 (+30)"
         elif z <= -1.0:
-            score += 25
-            details["pe_zscore_verdict"] = "저평가 (+25)"
+            score += 20
+            details["pe_zscore_verdict"] = "저평가 (+20)"
         else:
             details["pe_zscore_verdict"] = "적정 범위"
     else:
@@ -142,26 +151,47 @@ def score_valuation(ticker: str) -> Optional[dict]:
     # ── 목표가 괴리율 ──
     current = val_data.get("current_price")
     target = val_data.get("target_mean_price")
+    analyst_n = val_data.get("analyst_count", 0) or 0
     gap = calc_target_gap(current, target)
     details["target_gap_pct"] = gap
 
     if gap is not None:
-        if gap >= 40:
+        if gap >= 35:
             score += 35
             details["target_verdict"] = "극단 저평가 (+35)"
-        elif gap >= 25:
+        elif gap >= 20:
             score += 25
             details["target_verdict"] = "저평가 (+25)"
-        elif gap < 0:
+        elif gap >= 10:
+            score += 15
+            details["target_verdict"] = "완만 저평가 (+15)"
+        elif gap >= 0:
+            score += 5
+            details["target_verdict"] = "소폭 상승 여지 (+5)"
+        else:
             score -= 10
             warnings.append("PRICE_ABOVE_TARGET")
-            details["target_verdict"] = "현재가 > 목표가 (-10, 탈락 후보)"
-        else:
-            details["target_verdict"] = "적정 범위"
+            details["target_verdict"] = "현재가 > 목표가 (-10)"
     else:
         details["target_verdict"] = "데이터 없음"
 
-    # ── 보조 경고 ──
+    # ── 데이터 부족 패스 판단 ──
+    # PE Z-score도 없고 목표가도 없으면 점수 산출 자체가 불가 → 경고 후 통과
+    pe_missing = pe_result is None
+    target_missing = gap is None
+    if pe_missing and target_missing:
+        warnings.append("VALUATION_DATA_INSUFFICIENT")
+        return {
+            **val_data,
+            **details,
+            "val_score": 0,
+            "warnings": warnings,
+            "pass": True,
+            "fail_reason": None,
+            "pass_reason": "밸류에이션 데이터 부족 — 차트/기관 필터에 위임",
+        }
+
+    # ── 보조 경고 (즉시탈락 없음) ──
     peg = val_data.get("peg_ratio")
     if peg is not None and peg > 3.0:
         warnings.append("PEG_HIGH")
@@ -174,12 +204,11 @@ def score_valuation(ticker: str) -> Optional[dict]:
     if pb is not None and pb > 20:
         warnings.append("PB_EXTREME")
 
-    analyst_n = val_data.get("analyst_count")
-    if analyst_n is not None and analyst_n < 3:
+    if analyst_n < 3:
         warnings.append("LOW_ANALYST_COVERAGE")
 
-    # ── 통과 판정 ──
-    passed = (score >= 30) and (len(warnings) <= 2)
+    # ── 통과 판정: 점수 15 이상 + HARD_FAIL 없음 ──
+    passed = (score >= 15) and (not hard_fail)
 
     return {
         **val_data,
@@ -187,7 +216,7 @@ def score_valuation(ticker: str) -> Optional[dict]:
         "val_score": max(score, 0),
         "warnings": warnings,
         "pass": passed,
-        "fail_reason": None if passed else f"점수 {score} / 경고 {len(warnings)}개",
+        "fail_reason": None if passed else f"점수 {score} / 경고 {warnings}",
     }
 
 
