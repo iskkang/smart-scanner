@@ -11,6 +11,8 @@ import os
 from datetime import datetime
 from typing import Optional
 
+import io
+import requests
 import yfinance as yf
 import pandas as pd
 import numpy as np
