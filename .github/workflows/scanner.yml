@@ -18,6 +18,7 @@ on:
           - scan
           - track
           - portfolio
+          - panic
       add_ticker:
         description: '추가할 종목 (add 시)'
         required: false
@@ -27,11 +28,14 @@ on:
       remove_ticker:
         description: '제거할 종목 (remove 시)'
         required: false
+      panic_tickers:
+        description: '패닉 스캔 특정 종목 (공백 구분, 없으면 전체)'
+        required: false
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     permissions:
       contents: write
 
@@ -64,7 +68,6 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           NEWS_API_KEY: ${{ secrets.NEWS_API_KEY }}
         run: |
-          # 스케줄 크론에 따라 명령 결정
           if [ "${{ github.event_name }}" = "schedule" ]; then
             HOUR=$(date -u +%H)
             if [ "$HOUR" = "22" ]; then
@@ -76,11 +79,12 @@ jobs:
             CMD="${{ github.event.inputs.command }}"
           fi
 
-          # add/remove 처리
           if [ -n "${{ github.event.inputs.add_ticker }}" ] && [ -n "${{ github.event.inputs.add_price }}" ]; then
             CMD="add ${{ github.event.inputs.add_ticker }} ${{ github.event.inputs.add_price }}"
           elif [ -n "${{ github.event.inputs.remove_ticker }}" ]; then
             CMD="remove ${{ github.event.inputs.remove_ticker }}"
+          elif [ "$CMD" = "panic" ] && [ -n "${{ github.event.inputs.panic_tickers }}" ]; then
+            CMD="panic ${{ github.event.inputs.panic_tickers }}"
           fi
 
           echo "실행 명령: python main.py $CMD"
@@ -91,7 +95,6 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          # .gitignore에 data/가 있어도 positions.json은 강제 추적
           git add -f data/positions.json
           if git diff --staged --quiet; then
             echo "포지션 변경 없음 — 커밋 스킵"
