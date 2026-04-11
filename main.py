@@ -162,6 +162,20 @@ def run_add(ticker: str, price: float, shares: int = 0):
     print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
+def run_panic_scan_cmd(tickers: list = None):
+    """패닉 셀 저가 매수 스캔"""
+    logger.info("패닉 셀 저가 매수 스캔 실행")
+    try:
+        from panic_scanner import run_panic_scan, format_panic_report
+        passed = run_panic_scan(custom_tickers=tickers if tickers else None)
+
+        from notifier import send_telegram
+        report = format_panic_report(passed)
+        send_telegram(report)
+    except Exception as e:
+        logger.error(f"패닉 스캔 실패: {e}")
+
+
 def run_remove(ticker: str, reason: str = "수동 정리"):
     """종목 제거"""
     from position_manager import remove_position
@@ -186,6 +200,10 @@ if __name__ == "__main__":
         run_tracking()
     elif cmd == "portfolio":
         run_portfolio()
+    elif cmd == "panic":
+        # 특정 종목 지정 가능: python main.py panic SNDK AMKR MU
+        tickers = [t.upper() for t in sys.argv[2:]] if len(sys.argv) > 2 else None
+        run_panic_scan_cmd(tickers)
     elif cmd == "add" and len(sys.argv) >= 4:
         run_add(sys.argv[2], float(sys.argv[3]), int(sys.argv[4]) if len(sys.argv) > 4 else 0)
     elif cmd == "remove" and len(sys.argv) >= 3:
@@ -193,9 +211,11 @@ if __name__ == "__main__":
     else:
         print("""
 SMART SCANNER 사용법:
-  python main.py scan        — 전체 스캔 실행
-  python main.py track       — 포지션 트래킹 + 아침 리포트
-  python main.py portfolio   — 포트폴리오 현황
-  python main.py add TICKER PRICE [SHARES]  — 종목 추가
-  python main.py remove TICKER [REASON]     — 종목 제거
+  python main.py scan                        — 전체 스캔 실행
+  python main.py track                       — 포지션 트래킹 + 아침 리포트
+  python main.py portfolio                   — 포트폴리오 현황
+  python main.py panic                       — 패닉 셀 저가 매수 스캔 (S&P500 전체)
+  python main.py panic SNDK AMKR MU          — 특정 종목만 패닉 스캔
+  python main.py add TICKER PRICE [SHARES]   — 종목 추가
+  python main.py remove TICKER [REASON]      — 종목 제거
         """)
