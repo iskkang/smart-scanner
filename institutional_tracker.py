@@ -142,6 +142,7 @@ def score_institutional(data: dict) -> dict:
 
 def run_institutional_analysis(tickers: list) -> list:
     """밸류에이션 통과 종목에 대해 기관 동향 분석"""
+    import time
     logger.info(f"기관 동향 분석 시작 — {len(tickers)}종목")
 
     results = []
@@ -153,6 +154,7 @@ def run_institutional_analysis(tickers: list) -> list:
         status = "✅ 통과" if scored["pass"] else "❌ 탈락"
         logger.info(f"  {status} {ticker}: 기관 {scored.get('institutional_pct', 'N/A')}% | 점수 {scored['inst_score']} | {scored['signals']}")
         results.append(scored)
+        time.sleep(0.5)  # Rate limit 방지
 
     passed = [r for r in results if r["pass"]]
 
