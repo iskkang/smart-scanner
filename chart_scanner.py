@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 SECTOR_UNIVERSE = {
     "XLK": ["AAPL", "MSFT", "NVDA", "AVGO", "CRM", "ADBE", "AMD", "ORCL", "CSCO", "ACN",
             "INTC", "IBM", "INTU", "NOW", "QCOM", "TXN", "AMAT", "MU", "LRCX", "KLAC"],
-    "XLE": ["XOM", "CVX", "COP", "EOG", "SLB", "MPC", "PSX", "VLO", "OXY", "HAL"],
+    "XLE": ["XOM", "CVX", "COP", "EOG", "SLB", "MPC", "PSX", "VLO", "PXD", "OXY"],
     "XLF": ["BRK-B", "JPM", "V", "MA", "BAC", "WFC", "GS", "MS", "SPGI", "BLK"],
     "XLV": ["UNH", "JNJ", "LLY", "PFE", "ABBV", "MRK", "TMO", "ABT", "DHR", "AMGN"],
     "XLI": ["GE", "CAT", "HON", "UNP", "BA", "RTX", "LMT", "DE", "NOC", "WM"],
@@ -38,18 +38,79 @@ SECTOR_UNIVERSE = {
 }
 
 
+MIN_MARKET_CAP = 10_000_000_000  # $10B 이상 대형주
+
+
+def fetch_sp500_tickers() -> list:
+    """Wikipedia에서 S&P 500 전종목 실시간 수집"""
+    try:
+        import pandas as pd
+        tables = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")
+        tickers = tables[0]["Symbol"].str.replace(".", "-", regex=False).tolist()
+        logger.info(f"S&P 500 수집 완료: {len(tickers)}종목")
+        return tickers
+    except Exception as e:
+        logger.warning(f"S&P 500 수집 실패 — 내장 유니버스 사용: {e}")
+        return []
+
+
+def filter_by_market_cap(tickers: list, min_cap: int = MIN_MARKET_CAP) -> list:
+    """
+    시가총액 필터 — $10B 이상만 통과.
+    병렬로 market cap 빠르게 수집 후 필터링.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def get_cap(ticker):
+        try:
+            cap = yf.Ticker(ticker).info.get("marketCap")
+            return ticker, cap
+        except Exception:
+            return ticker, None
+
+    passed = []
+    with ThreadPoolExecutor(max_workers=20) as executor:
+        futures = {executor.submit(get_cap, t): t for t in tickers}
+        for future in as_completed(futures):
+            ticker, cap = future.result()
+            if cap and cap >= min_cap:
+                passed.append((ticker, cap))
+
+    # 시가총액 내림차순 정렬
+    passed.sort(key=lambda x: x[1], reverse=True)
+    result = [t for t, _ in passed]
+    logger.info(f"시가총액 필터 완료: {len(tickers)}종목 → {len(result)}종목 ($10B+)")
+    return result
+
+
 def get_scan_universe(favored_sectors: list = None) -> list:
-    """스캔 대상 종목 리스트 반환. 수혜 섹터가 주어지면 해당 섹터만, 없으면 전체."""
-    if favored_sectors:
-        tickers = []
-        for sector in favored_sectors:
-            tickers.extend(SECTOR_UNIVERSE.get(sector, []))
-        return sorted(set(tickers))
-    # 전체
-    all_tickers = []
-    for v in SECTOR_UNIVERSE.values():
-        all_tickers.extend(v)
-    return sorted(set(all_tickers))
+    """
+    스캔 유니버스 구성:
+    1. S&P 500 전종목 수집 (Wikipedia)
+    2. 시가총액 $10B 이상 필터
+    3. 수혜 섹터 종목을 앞으로 배치 (우선 스캔)
+    """
+    sp500 = fetch_sp500_tickers()
+    if not sp500:
+        all_tickers = []
+        for v in SECTOR_UNIVERSE.values():
+            all_tickers.extend(v)
+        return sorted(set(all_tickers))
+
+    # 시가총액 필터
+    universe = filter_by_market_cap(sp500, MIN_MARKET_CAP)
+
+    if not favored_sectors:
+        return universe
+
+    # 수혜 섹터 종목 앞으로 배치 (제외하지 않고 우선순위만)
+    priority = set()
+    for sector in favored_sectors:
+        priority.update(SECTOR_UNIVERSE.get(sector, []))
+
+    front = [t for t in universe if t in priority]
+    rest = [t for t in universe if t not in priority]
+    return front + rest
 
 
 # ── 기술적 지표 계산 ───────────────────────────────────────────
@@ -180,25 +241,35 @@ def scan_ticker(ticker: str) -> Optional[dict]:
 def run_chart_scan(favored_sectors: list = None, min_score: int = 40) -> list:
     """
     차트 스캔 전체 실행.
-    - favored_sectors: 거시환경 분석에서 넘어온 수혜 섹터 리스트
-    - min_score: 최소 차트 점수
+    S&P 500 → 시가총액 $10B+ 필터 → 차트 조건 스캔 (병렬)
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     universe = get_scan_universe(favored_sectors)
-    logger.info(f"차트 스캔 시작 — 대상 {len(universe)}종목 (수혜섹터: {favored_sectors})")
+    logger.info(f"차트 스캔 시작 — 대상 {len(universe)}종목 (수혜섹터 우선 배치: {favored_sectors})")
 
     results = []
-    for i, ticker in enumerate(universe):
-        result = scan_ticker(ticker)
-        if result and result["chart_score"] >= min_score:
-            results.append(result)
-            logger.info(f"  ✅ {ticker}: 점수 {result['chart_score']}점 | 눌림 {result['pullback_pct']}% | RSI {result['rsi']}")
-        if (i + 1) % 20 == 0:
-            logger.info(f"  ... {i + 1}/{len(universe)} 스캔 완료")
+    completed = 0
 
-    # 점수 내림차순 정렬
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        future_to_ticker = {executor.submit(scan_ticker, t): t for t in universe}
+        for future in as_completed(future_to_ticker):
+            completed += 1
+            try:
+                result = future.result()
+                if result and result["chart_score"] >= min_score:
+                    results.append(result)
+                    logger.info(
+                        f"  ✅ {result['ticker']}: 점수 {result['chart_score']}점 "
+                        f"| 눌림 {result['pullback_pct']}% | RSI {result['rsi']}"
+                    )
+            except Exception:
+                pass
+            if completed % 50 == 0:
+                logger.info(f"  ... {completed}/{len(universe)} 스캔 완료")
+
     results.sort(key=lambda x: x["chart_score"], reverse=True)
 
-    # 저장
     os.makedirs("data", exist_ok=True)
     output = {
         "timestamp": datetime.now().isoformat(),
