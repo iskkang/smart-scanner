@@ -127,27 +127,34 @@ def build_daily_report() -> str:
         for i, rec in enumerate(passed[:5], 1):
             t = rec["ticker"]
             chart_info = chart_map.get(t, {})
-            val_info = val_map.get(t, {})
-            bt = rec.get("backtest", {})
+            val_info   = val_map.get(t, {})
+            bt         = rec.get("backtest", {})
             strategies = rec.get("passed_strategies", [])
 
             score = chart_info.get("chart_score", 0) + val_info.get("val_score", 0)
             stars = format_star_rating(score)
 
-            pe_z = val_info.get("pe_zscore", {})
-            z_val = pe_z.get("pe_zscore", "N/A") if pe_z else "N/A"
-            gap = val_info.get("target_gap_pct", "N/A")
+            # 새 valuation 필드
+            gap      = val_info.get("target_gap_pct")
+            gap_str  = f"+{gap:.1f}%" if gap is not None else "N/A"
+            sector   = val_info.get("sector_code", "")
+            signals  = val_info.get("signals", [])
+            sig_str  = " | ".join(signals[:2]) if signals else "N/A"
 
-            lines.append(f"{i}. <b>{t}</b> {stars}")
+            # 백테스트 신호 수 포함
+            bt_win    = bt.get("win_rate", 0)
+            bt_avg    = bt.get("avg_return", 0)
+            bt_n      = bt.get("signal_count", 0)
+
+            lines.append(f"{i}. <b>{t}</b> {stars} [{sector}]")
             lines.append(f"   현재가: ${chart_info.get('price', 'N/A')} | 눌림: {chart_info.get('pullback_pct', 'N/A')}%")
-            lines.append(f"   PE Z-score: {z_val}σ | 목표가 괴리: +{gap}%")
+            lines.append(f"   밸류: {sig_str}")
+            lines.append(f"   목표가 괴리: {gap_str}")
 
             strat_str = " ".join([f"{s} ✅" for s in strategies])
             lines.append(f"   통과전략: {strat_str}")
 
-            win = bt.get("win_rate", 0)
-            avg = bt.get("avg_return", 0)
-            lines.append(f"   백테스트: 승률 {win}% | 평균수익 +{avg}%")
+            lines.append(f"   백테스트: 승률 {bt_win}% | 평균수익 {bt_avg:+.2f}% | 신호 {bt_n}회")
             lines.append("")
 
     lines.append("━" * 30)
