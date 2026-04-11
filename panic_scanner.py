@@ -39,11 +39,22 @@ MIN_MARKET_CAP = 10_000_000_000  # $10B+
 def fetch_universe() -> list:
     """S&P 500 + 시가총액 $10B+ 필터"""
     try:
+        import io
         import pandas as pd
-        tables = pd.read_html(
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            )
+        }
+        resp = requests.get(
             "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
-            flavor="lxml",
+            headers=headers,
+            timeout=15,
         )
+        resp.raise_for_status()
+        tables = pd.read_html(io.StringIO(resp.text), flavor="lxml")
         sp500 = tables[0]["Symbol"].str.replace(".", "-", regex=False).tolist()
         logger.info(f"S&P 500 수집: {len(sp500)}종목")
     except Exception as e:
