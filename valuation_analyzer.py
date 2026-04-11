@@ -95,24 +95,24 @@ def calc_target_gap(current_price: float, target_mean: float) -> Optional[float]
 
 def score_valuation(ticker: str) -> Optional[dict]:
     """
-    밸류에이션 종합 점수 산출.
+    밸류에이션 필터 — "극단 고평가 차단" 용도로만 사용.
 
-    PE Z-score 점수:
-      -1.5σ 이하: +30
-      -1.0σ 이하: +20
-      +1.5σ ~ +2.5σ: 참고 경고만 (즉시 탈락 없음 — 현재 EPS 기반 역산은 사이클주에서 왜곡 심함)
-      +2.5σ 초과: 경고 (HIGH_OVERVALUED)
+    설계 원칙:
+      차트 스캔이 이미 이평선 정배열 + 눌림목을 검증함.
+      밸류에이션은 명백한 버블/고평가 종목을 거르는 역할만 담당.
+      데이터 부족 또는 적정 범위이면 기본값 통과.
 
-    목표가 괴리율 점수:
-      35% 이상:  +35
-      20% 이상:  +25
-      10% 이상:  +15  ← 신규 (눌림목 구간 적정 괴리)
-       0% 이상:  +5   ← 신규 (상승 여지 있음)
-      현재가 > 목표가: -10 경고
+    즉시 탈락 조건 (hard_fail):
+      - 현재가가 애널리스트 평균 목표가 대비 10% 이상 고평가  (목표가 < 현재가 × 0.90)
+      - PE Z-score > 2.5σ  AND  Forward PE > 40 동시 충족 (버블 신호 복합)
 
-    데이터 부족 (PE·목표가 모두 없음): 경고만 추가 후 통과 (차트·기관 필터에 위임)
-
-    통과: 점수 15 이상 + 즉시탈락 경고(HARD_FAIL) 없음
+    점수 (참고용, 통과 기준에는 사용 안 함):
+      목표가 괴리 35%+ : +35
+      목표가 괴리 20%+ : +25
+      목표가 괴리 10%+ : +15
+      목표가 괴리  0%+ : +5
+      PE Z-score ≤ -1.5σ : +20
+      PE Z-score ≤ -1.0σ : +10
     """
     val_data = fetch_valuation_data(ticker)
     if not val_data:
@@ -122,93 +122,75 @@ def score_valuation(ticker: str) -> Optional[dict]:
     warnings = []
     details = {}
     hard_fail = False
+    fail_reason = None
 
     # ── PE Z-score ──
     pe_result = calc_pe_zscore(ticker, val_data.get("trailing_eps"))
+    fwd_pe = val_data.get("forward_pe")
+
     if pe_result:
         details["pe_zscore"] = pe_result
         z = pe_result["pe_zscore"]
 
-        if z > 2.5:
-            # 극단 고평가만 경고 (즉시 탈락은 없음 — 사이클주 EPS 왜곡 대응)
-            warnings.append("PE_Z_EXTREME_OVERVALUED")
-            details["pe_zscore_verdict"] = "극단 고평가 주의 (경고)"
-        elif z >= 1.5:
-            # 고평가 범위이나 사이클주 특성상 경고만
-            details["pe_zscore_verdict"] = "고평가 구간 (경고 없음 — 사이클 보정)"
+        if z > 2.5 and fwd_pe and fwd_pe > 40:
+            hard_fail = True
+            fail_reason = f"PE 버블 신호: Z-score {z:.1f}σ + Forward PE {fwd_pe:.0f}"
+            details["pe_zscore_verdict"] = f"버블 구간 탈락 (Z={z:.1f}, FwdPE={fwd_pe:.0f})"
+        elif z > 2.5:
+            warnings.append("PE_Z_EXTREME")
+            details["pe_zscore_verdict"] = f"극단 고평가 경고 (Z={z:.1f})"
         elif z <= -1.5:
-            score += 30
-            details["pe_zscore_verdict"] = "극단 저평가 (+30)"
-        elif z <= -1.0:
             score += 20
-            details["pe_zscore_verdict"] = "저평가 (+20)"
+            details["pe_zscore_verdict"] = f"저평가 (+20, Z={z:.1f})"
+        elif z <= -1.0:
+            score += 10
+            details["pe_zscore_verdict"] = f"완만 저평가 (+10, Z={z:.1f})"
         else:
-            details["pe_zscore_verdict"] = "적정 범위"
+            details["pe_zscore_verdict"] = f"적정 (Z={z:.1f})"
     else:
         details["pe_zscore"] = None
-        details["pe_zscore_verdict"] = "데이터 부족"
+        details["pe_zscore_verdict"] = "데이터 없음"
 
     # ── 목표가 괴리율 ──
     current = val_data.get("current_price")
     target = val_data.get("target_mean_price")
-    analyst_n = val_data.get("analyst_count", 0) or 0
+    analyst_n = val_data.get("analyst_count") or 0
     gap = calc_target_gap(current, target)
     details["target_gap_pct"] = gap
 
-    if gap is not None:
-        if gap >= 35:
+    if gap is not None and analyst_n >= 2:
+        if gap <= -10:
+            # 현재가가 목표가보다 10%+ 높음 → 즉시 탈락
+            hard_fail = True
+            fail_reason = fail_reason or f"현재가 목표가 대비 {abs(gap):.1f}% 초과"
+            details["target_verdict"] = f"목표가 대폭 초과 탈락 (gap={gap:.1f}%)"
+        elif gap < 0:
+            warnings.append("PRICE_ABOVE_TARGET")
+            details["target_verdict"] = f"현재가 > 목표가 경고 (gap={gap:.1f}%)"
+        elif gap >= 35:
             score += 35
-            details["target_verdict"] = "극단 저평가 (+35)"
+            details["target_verdict"] = f"극단 저평가 (+35, gap={gap:.1f}%)"
         elif gap >= 20:
             score += 25
-            details["target_verdict"] = "저평가 (+25)"
+            details["target_verdict"] = f"저평가 (+25, gap={gap:.1f}%)"
         elif gap >= 10:
             score += 15
-            details["target_verdict"] = "완만 저평가 (+15)"
-        elif gap >= 0:
-            score += 5
-            details["target_verdict"] = "소폭 상승 여지 (+5)"
+            details["target_verdict"] = f"완만 저평가 (+15, gap={gap:.1f}%)"
         else:
-            score -= 10
-            warnings.append("PRICE_ABOVE_TARGET")
-            details["target_verdict"] = "현재가 > 목표가 (-10)"
+            score += 5
+            details["target_verdict"] = f"소폭 상승 여지 (+5, gap={gap:.1f}%)"
+    elif gap is not None:
+        details["target_verdict"] = f"애널리스트 커버리지 부족 (n={analyst_n})"
     else:
-        details["target_verdict"] = "데이터 없음"
+        details["target_verdict"] = "목표가 데이터 없음"
 
-    # ── 데이터 부족 패스 판단 ──
-    # PE Z-score도 없고 목표가도 없으면 점수 산출 자체가 불가 → 경고 후 통과
-    pe_missing = pe_result is None
-    target_missing = gap is None
-    if pe_missing and target_missing:
-        warnings.append("VALUATION_DATA_INSUFFICIENT")
-        return {
-            **val_data,
-            **details,
-            "val_score": 0,
-            "warnings": warnings,
-            "pass": True,
-            "fail_reason": None,
-            "pass_reason": "밸류에이션 데이터 부족 — 차트/기관 필터에 위임",
-        }
-
-    # ── 보조 경고 (즉시탈락 없음) ──
+    # ── 보조 경고 (탈락 없음) ──
     peg = val_data.get("peg_ratio")
-    if peg is not None and peg > 3.0:
-        warnings.append("PEG_HIGH")
+    if peg is not None and peg > 4.0:
+        warnings.append("PEG_EXTREME")
 
-    fwd_pe = val_data.get("forward_pe")
-    if fwd_pe is not None and fwd_pe > 60:
-        warnings.append("FORWARD_PE_EXTREME")
-
-    pb = val_data.get("price_to_book")
-    if pb is not None and pb > 20:
-        warnings.append("PB_EXTREME")
-
-    if analyst_n < 3:
-        warnings.append("LOW_ANALYST_COVERAGE")
-
-    # ── 통과 판정: 점수 15 이상 + HARD_FAIL 없음 ──
-    passed = (score >= 15) and (not hard_fail)
+    # ── 통과 판정: hard_fail 없으면 기본 통과 ──
+    passed = not hard_fail
 
     return {
         **val_data,
@@ -216,7 +198,7 @@ def score_valuation(ticker: str) -> Optional[dict]:
         "val_score": max(score, 0),
         "warnings": warnings,
         "pass": passed,
-        "fail_reason": None if passed else f"점수 {score} / 경고 {warnings}",
+        "fail_reason": fail_reason,
     }
 
 
