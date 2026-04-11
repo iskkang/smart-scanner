@@ -124,16 +124,9 @@ def score_valuation(ticker: str) -> Optional[dict]:
         z = pe_result["pe_zscore"]
 
         if z >= 1.5:
+            # 즉시 탈락 → 경고로 변경: 목표가 괴리율 등 다른 지표로 보완 판단
             warnings.append("PE_Z_HIGH_OVERVALUED")
-            details["pe_zscore_verdict"] = "고평가 — 탈락"
-            return {
-                **val_data,
-                **details,
-                "val_score": 0,
-                "warnings": warnings,
-                "pass": False,
-                "fail_reason": "PE Z-score +1.5σ 이상 고평가",
-            }
+            details["pe_zscore_verdict"] = "고평가 주의 (경고)"
         elif z <= -1.5:
             score += 35
             details["pe_zscore_verdict"] = "극단 저평가 (+35)"
@@ -186,7 +179,7 @@ def score_valuation(ticker: str) -> Optional[dict]:
         warnings.append("LOW_ANALYST_COVERAGE")
 
     # ── 통과 판정 ──
-    passed = (score >= 30) and (len(warnings) <= 1)
+    passed = (score >= 30) and (len(warnings) <= 2)
 
     return {
         **val_data,
