@@ -417,6 +417,7 @@ def score_valuation(ticker: str) -> Optional[dict]:
 
 
 def run_valuation_analysis(tickers: list) -> list:
+    import time
     logger.info(f"밸류에이션 분석 시작 — {len(tickers)}종목")
     results = []
 
@@ -430,6 +431,7 @@ def run_valuation_analysis(tickers: list) -> list:
             f"점수 {result['val_score']} | {result['signals']}"
         )
         results.append(result)
+        time.sleep(0.5)  # Rate limit 방지
 
     passed = [r for r in results if r["pass"]]
     os.makedirs("data", exist_ok=True)
