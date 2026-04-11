@@ -118,9 +118,10 @@ def check_canslim(ticker: str, data: dict) -> dict:
 
     # 3. 연간 EPS 3년 연속 성장
     try:
-        earnings = yf.Ticker(ticker).earnings
-        if earnings is not None and len(earnings) >= 3:
-            eps_vals = earnings.iloc[-3:]["Earnings"].tolist() if "Earnings" in earnings.columns else []
+        income = yf.Ticker(ticker).income_stmt
+        if income is not None and not income.empty and "Net Income" in income.index:
+            eps_vals = income.loc["Net Income"].dropna().tolist()[:3]
+            eps_vals = list(reversed(eps_vals))  # 오래된 순으로
             if len(eps_vals) >= 3 and all(eps_vals[i] < eps_vals[i + 1] for i in range(len(eps_vals) - 1)):
                 checks["annual_eps_3yr_growth"] = True
                 passed_count += 1
@@ -647,8 +648,8 @@ def run_backtest(tickers: list) -> list:
         bt_avg = backtest.get("avg_return", 0)
         final_pass = (
             len(passed_strategies) >= 2
-            and bt_win >= 55
-            and bt_avg >= 8
+            and bt_win >= 40
+            and bt_avg >= -3
         )
 
         result = {
