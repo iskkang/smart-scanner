@@ -120,8 +120,7 @@ def check_canslim(ticker: str, data: dict) -> dict:
     try:
         income = yf.Ticker(ticker).income_stmt
         if income is not None and not income.empty and "Net Income" in income.index:
-            eps_vals = income.loc["Net Income"].dropna().tolist()[:3]
-            eps_vals = list(reversed(eps_vals))  # 오래된 순으로
+            eps_vals = list(reversed(income.loc["Net Income"].dropna().tolist()[:3]))
             if len(eps_vals) >= 3 and all(eps_vals[i] < eps_vals[i + 1] for i in range(len(eps_vals) - 1)):
                 checks["annual_eps_3yr_growth"] = True
                 passed_count += 1
