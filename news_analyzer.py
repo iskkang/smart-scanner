@@ -11,6 +11,7 @@ import os
 from datetime import datetime, timedelta
 from typing import Optional
 
+import anthropic
 import requests
 import yfinance as yf
 
@@ -109,7 +110,7 @@ pass = false 조건:
 
 
 def analyze_with_claude(ticker: str, headlines: list, short_data: dict) -> Optional[dict]:
-    """Claude Sonnet으로 뉴스 감성 + 공매도 리스크 분석"""
+    """Claude SDK로 뉴스 감성 + 공매도 리스크 분석"""
     if not ANTHROPIC_API_KEY:
         logger.warning("ANTHROPIC_API_KEY 미설정 — Claude 뉴스 분석 스킵")
         return None
@@ -125,22 +126,13 @@ def analyze_with_claude(ticker: str, headlines: list, short_data: dict) -> Optio
     )
 
     try:
-        resp = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": ANTHROPIC_API_KEY,
-                "content-type": "application/json",
-                "anthropic-version": "2023-06-01",
-            },
-            json={
-                "model": "claude-sonnet-4-6",
-                "max_tokens": 1000,
-                "messages": [{"role": "user", "content": prompt}],
-            },
-            timeout=30,
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        message = client.messages.create(
+            model="claude-opus-4-6",
+            max_tokens=1000,
+            messages=[{"role": "user", "content": prompt}],
         )
-        resp.raise_for_status()
-        content = resp.json()["content"][0]["text"]
+        content = message.content[0].text
         clean = content.strip().removeprefix("```json").removesuffix("```").strip()
         return json.loads(clean)
     except Exception as e:
