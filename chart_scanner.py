@@ -125,7 +125,103 @@ def get_scan_universe(favored_sectors: list = None) -> list:
     return front + rest
 
 
-# ── 기술적 지표 계산 ───────────────────────────────────────────
+# ── 동적 스캔 임계치 ───────────────────────────────────────────
+
+def get_dynamic_thresholds(macro_data: dict = None) -> dict:
+    """
+    VIX + 거시 리스크 레벨에 따라 스캔 기준을 동적 조정.
+
+    VIX 구간:
+      >= 30 (공포)   : RSI 하한 낮춤, 눌림목 더 깊어도 허용, 점수 기준 완화
+      20~30 (경계)   : 기본 기준
+      <= 15 (안정)   : RSI 상한 높임, 얕은 눌림목도 허용, 점수 기준 강화
+
+    리스크 레벨 (Claude 분석 결과):
+      HIGH   : 공포 구간 기준 추가 적용
+      MEDIUM : 기본 기준 유지
+      LOW    : 안정 구간 기준 적용
+    """
+    defaults = {
+        "rsi_min": 38, "rsi_max": 58,
+        "pullback_min": -15, "pullback_max": -5,
+        "min_score": 40,
+        "vol_surge_threshold": 1.5,
+        "regime": "NORMAL",
+    }
+
+    if not macro_data:
+        return defaults
+
+    raw = macro_data.get("raw_data") or {}
+    ai  = macro_data.get("ai_analysis") or {}
+
+    vix        = raw.get("vix") or 20
+    risk_level = ai.get("risk_level", "MEDIUM").upper()
+    sp500_up   = raw.get("sp500_consecutive_up", 0)
+
+    # ── VIX 기반 1차 조정 ──
+    if vix >= 30:
+        thresholds = {
+            "rsi_min": 25, "rsi_max": 50,        # 더 과매도된 종목까지 포함
+            "pullback_min": -25, "pullback_max": -8,  # 더 깊은 눌림목 허용
+            "min_score": 35,                      # 통과 기준 완화
+            "vol_surge_threshold": 1.3,           # 거래량 급증 기준 완화
+            "regime": "FEAR",
+        }
+    elif vix >= 20:
+        thresholds = {
+            "rsi_min": 38, "rsi_max": 58,
+            "pullback_min": -15, "pullback_max": -5,
+            "min_score": 40,
+            "vol_surge_threshold": 1.5,
+            "regime": "CAUTION",
+        }
+    elif vix >= 15:
+        thresholds = {
+            "rsi_min": 40, "rsi_max": 60,
+            "pullback_min": -12, "pullback_max": -4,
+            "min_score": 45,
+            "vol_surge_threshold": 1.5,
+            "regime": "NORMAL",
+        }
+    else:  # VIX < 15 (강세장)
+        thresholds = {
+            "rsi_min": 45, "rsi_max": 65,        # 더 강한 종목 위주
+            "pullback_min": -10, "pullback_max": -3,  # 얕은 눌림목도 허용
+            "min_score": 50,                      # 통과 기준 강화
+            "vol_surge_threshold": 1.8,
+            "regime": "BULL",
+        }
+
+    # ── 리스크 레벨 2차 보정 ──
+    if risk_level == "HIGH":
+        # 추가 보수적: RSI 하한 낮추고 눌림목 더 깊게 허용
+        thresholds["rsi_min"]      = max(thresholds["rsi_min"] - 5, 20)
+        thresholds["pullback_min"] = max(thresholds["pullback_min"] - 5, -30)
+        thresholds["min_score"]    = max(thresholds["min_score"] - 5, 30)
+        thresholds["regime"]      += "_HIGH_RISK"
+    elif risk_level == "LOW":
+        # 추가 공격적: RSI 상한 높이고 점수 기준 강화
+        thresholds["rsi_max"]   = min(thresholds["rsi_max"] + 5, 70)
+        thresholds["min_score"] = min(thresholds["min_score"] + 5, 60)
+        thresholds["regime"]   += "_LOW_RISK"
+
+    # ── S&P500 연속 상승 보정 ──
+    # 연속 상승 5일+ = 단기 과열 → 기준 강화
+    if sp500_up >= 5:
+        thresholds["min_score"] = min(thresholds["min_score"] + 5, 65)
+        thresholds["regime"]   += "_OVERBOUGHT"
+
+    logger.info(
+        f"동적 임계치 적용 — 레짐: {thresholds['regime']} | "
+        f"VIX {vix:.1f} | 리스크 {risk_level} | "
+        f"RSI {thresholds['rsi_min']}~{thresholds['rsi_max']} | "
+        f"눌림목 {thresholds['pullback_min']}%~{thresholds['pullback_max']}% | "
+        f"최소점수 {thresholds['min_score']}"
+    )
+    return thresholds
+
+
 
 def calc_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     """RSI 계산"""
@@ -138,92 +234,90 @@ def calc_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     return 100 - (100 / (1 + rs))
 
 
-def scan_ticker(ticker: str) -> Optional[dict]:
+def scan_ticker(ticker: str, thresholds: dict = None) -> Optional[dict]:
     """
     개별 종목 차트 스캔.
-    조건:
-      1) 20/50/200일 이평선 정배열
-      2) 최근 60일 고점 대비 -5% ~ -15% 눌림목
-      3) 조정 중 거래량 감소 (vol_5d < vol_20d)
-      4) RSI 38~58
-      5) 반등 신호: 거래량 1.5배 급증 + 5일선 위 종가
-    점수 산출 (0~100)
+    thresholds: get_dynamic_thresholds() 결과 (None이면 기본값 사용)
     """
+    t = thresholds or {
+        "rsi_min": 38, "rsi_max": 58,
+        "pullback_min": -15, "pullback_max": -5,
+        "vol_surge_threshold": 1.5,
+    }
+    rsi_min  = t["rsi_min"]
+    rsi_max  = t["rsi_max"]
+    pb_min   = t["pullback_min"]
+    pb_max   = t["pullback_max"]
+    vol_thr  = t["vol_surge_threshold"]
+
     try:
-        t = yf.Ticker(ticker)
-        hist = t.history(period="1y")
+        hist = yf.Ticker(ticker).history(period="1y")
         if len(hist) < 200:
             return None
 
-        close = hist["Close"]
+        close  = hist["Close"]
         volume = hist["Volume"]
 
-        # 이평선
-        sma20 = close.rolling(20).mean()
-        sma50 = close.rolling(50).mean()
+        sma20  = close.rolling(20).mean()
+        sma50  = close.rolling(50).mean()
         sma200 = close.rolling(200).mean()
 
-        latest_close = float(close.iloc[-1])
-        latest_sma20 = float(sma20.iloc[-1])
-        latest_sma50 = float(sma50.iloc[-1])
+        latest_close  = float(close.iloc[-1])
+        latest_sma20  = float(sma20.iloc[-1])
+        latest_sma50  = float(sma50.iloc[-1])
         latest_sma200 = float(sma200.iloc[-1])
 
         # 조건 1: 정배열
         if not (latest_sma20 > latest_sma50 > latest_sma200):
             return None
 
-        # 조건 2: 눌림목 (-5% ~ -15%)
-        high_60d = float(close.iloc[-60:].max())
+        # 조건 2: 눌림목 (동적 범위)
+        high_60d    = float(close.iloc[-60:].max())
         pullback_pct = (latest_close - high_60d) / high_60d * 100
-        if not (-15 <= pullback_pct <= -5):
+        if not (pb_min <= pullback_pct <= pb_max):
             return None
 
         # 조건 3: 거래량 감소
-        vol_5d = float(volume.iloc[-5:].mean())
+        vol_5d  = float(volume.iloc[-5:].mean())
         vol_20d = float(volume.iloc[-20:].mean())
         if vol_5d >= vol_20d:
             return None
 
-        # 조건 4: RSI
-        rsi = calc_rsi(close)
+        # 조건 4: RSI (동적 범위)
+        rsi        = calc_rsi(close)
         latest_rsi = float(rsi.iloc[-1])
-        if not (38 <= latest_rsi <= 58):
+        if not (rsi_min <= latest_rsi <= rsi_max):
             return None
 
         # 조건 5: 반등 신호
-        vol_today = float(volume.iloc[-1])
-        vol_surge = vol_today / vol_5d if vol_5d > 0 else 0
+        vol_today  = float(volume.iloc[-1])
+        vol_surge  = vol_today / vol_5d if vol_5d > 0 else 0
         above_sma5 = latest_close > float(close.rolling(5).mean().iloc[-1])
-
-        has_bounce = (vol_surge >= 1.5) and above_sma5
+        has_bounce = (vol_surge >= vol_thr) and above_sma5
 
         # ── 점수 산출 ──
         score = 0
 
-        # 눌림목 깊이
         if -12 <= pullback_pct <= -8:
             score += 30
-        elif -15 <= pullback_pct < -8 or -8 < pullback_pct <= -5:
+        elif pb_min <= pullback_pct < -8 or -8 < pullback_pct <= pb_max:
             score += 15
 
-        # RSI
-        if 42 <= latest_rsi <= 52:
+        mid_rsi = (rsi_min + rsi_max) / 2
+        if abs(latest_rsi - mid_rsi) <= 5:
             score += 25
-        elif 38 <= latest_rsi < 42 or 52 < latest_rsi <= 58:
+        elif rsi_min <= latest_rsi <= rsi_max:
             score += 12
 
-        # 거래량 급증
-        if vol_surge >= 1.5:
+        if vol_surge >= vol_thr:
             score += 25
-        elif vol_surge >= 1.2:
+        elif vol_surge >= vol_thr * 0.8:
             score += 10
 
-        # 5일선 위 마감
         if above_sma5:
             score += 10
 
-        # 52주 고점 대비
-        high_52w = float(close.max())
+        high_52w    = float(close.max())
         from_52w_high = (latest_close - high_52w) / high_52w * 100
         if from_52w_high >= -30:
             score += 10
@@ -241,6 +335,7 @@ def scan_ticker(ticker: str) -> Optional[dict]:
             "sma20": round(latest_sma20, 2),
             "sma50": round(latest_sma50, 2),
             "sma200": round(latest_sma200, 2),
+            "scan_regime": t.get("regime", "NORMAL"),
         }
 
     except Exception as e:
@@ -250,27 +345,36 @@ def scan_ticker(ticker: str) -> Optional[dict]:
 
 # ── 전체 스캔 실행 ─────────────────────────────────────────────
 
-def run_chart_scan(favored_sectors: list = None, min_score: int = 40) -> list:
+def run_chart_scan(favored_sectors: list = None, min_score: int = 40, macro_data: dict = None) -> list:
     """
     차트 스캔 전체 실행.
-    S&P 500 → 시가총액 $10B+ 필터 → 차트 조건 병렬 스캔
+    macro_data: macro_analyzer 결과 (VIX + 리스크 레벨 기반 동적 임계치 적용)
     """
     import time
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
+    thresholds = get_dynamic_thresholds(macro_data)
+    effective_min_score = thresholds["min_score"]
+
     universe = get_scan_universe(favored_sectors)
-    logger.info(f"차트 스캔 시작 — 대상 {len(universe)}종목 (수혜섹터 우선 배치: {favored_sectors})")
+    logger.info(
+        f"차트 스캔 시작 — 대상 {len(universe)}종목 | "
+        f"레짐 {thresholds['regime']} | "
+        f"RSI {thresholds['rsi_min']}~{thresholds['rsi_max']} | "
+        f"눌림목 {thresholds['pullback_min']}~{thresholds['pullback_max']}% | "
+        f"최소점수 {effective_min_score}"
+    )
 
     results = []
     completed = 0
 
     with ThreadPoolExecutor(max_workers=5) as executor:
-        future_to_ticker = {executor.submit(scan_ticker, t): t for t in universe}
+        future_to_ticker = {executor.submit(scan_ticker, t, thresholds): t for t in universe}
         for future in as_completed(future_to_ticker):
             completed += 1
             try:
                 result = future.result()
-                if result and result["chart_score"] >= min_score:
+                if result and result["chart_score"] >= effective_min_score:
                     results.append(result)
                     logger.info(
                         f"  ✅ {result['ticker']}: 점수 {result['chart_score']}점 "
@@ -280,7 +384,7 @@ def run_chart_scan(favored_sectors: list = None, min_score: int = 40) -> list:
                 pass
             if completed % 100 == 0:
                 logger.info(f"  ... {completed}/{len(universe)} 스캔 완료")
-                time.sleep(1)  # Rate limit 방지용 딜레이
+                time.sleep(1)
 
     results.sort(key=lambda x: x["chart_score"], reverse=True)
 
@@ -289,7 +393,7 @@ def run_chart_scan(favored_sectors: list = None, min_score: int = 40) -> list:
         "timestamp": datetime.now().isoformat(),
         "scan_universe_size": len(universe),
         "favored_sectors": favored_sectors,
-        "min_score": min_score,
+        "thresholds": thresholds,
         "passed_count": len(results),
         "results": results,
     }
