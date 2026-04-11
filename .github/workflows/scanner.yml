@@ -32,6 +32,8 @@ jobs:
   run:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: write
 
     steps:
       - name: 코드 체크아웃
@@ -46,13 +48,10 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: 포지션 데이터 복원
-        env:
-          POSITIONS_DATA: ${{ secrets.POSITIONS_DATA }}
         run: |
           mkdir -p data
-          if [ -n "$POSITIONS_DATA" ]; then
-            echo "$POSITIONS_DATA" > data/positions.json
-            echo "포지션 데이터 복원 완료"
+          if [ -f data/positions.json ]; then
+            echo "포지션 데이터 확인 완료"
           else
             echo "[]" > data/positions.json
             echo "포지션 데이터 없음 — 빈 파일 생성"
@@ -87,15 +86,18 @@ jobs:
           echo "실행 명령: python main.py $CMD"
           python main.py $CMD
 
-      - name: 포지션 데이터 백업
+      - name: 포지션 데이터 자동 저장
         if: always()
         run: |
-          if [ -f data/positions.json ]; then
-            echo "포지션 데이터:"
-            cat data/positions.json
-            echo ""
-            echo "⚠️ GitHub Secrets에 POSITIONS_DATA를 수동 업데이트하거나"
-            echo "   별도 저장소(gist/S3)를 사용하세요."
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/positions.json
+          if git diff --staged --quiet; then
+            echo "포지션 변경 없음 — 커밋 스킵"
+          else
+            git commit -m "chore: update positions.json [skip ci]"
+            git push
+            echo "포지션 데이터 저장 완료"
           fi
 
       - name: 스캔 로그 아티팩트 업로드
