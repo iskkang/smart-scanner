@@ -13,8 +13,8 @@ import logging
 from datetime import datetime, timedelta
 from typing import Optional
 
+import anthropic
 import yfinance as yf
-import requests
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -211,7 +211,7 @@ ANALYSIS_PROMPT = """당신은 월가 수석 매크로 전략가입니다. 아�
 
 
 def analyze_with_claude(macro_data: dict, hints: dict) -> Optional[dict]:
-    """Claude Sonnet으로 거시환경 종합 분석"""
+    """Claude SDK로 거시환경 종합 분석"""
     if not ANTHROPIC_API_KEY:
         logger.warning("ANTHROPIC_API_KEY 미설정 — Claude 분석 스킵")
         return None
@@ -222,23 +222,13 @@ def analyze_with_claude(macro_data: dict, hints: dict) -> Optional[dict]:
     )
 
     try:
-        resp = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": ANTHROPIC_API_KEY,
-                "content-type": "application/json",
-                "anthropic-version": "2023-06-01",
-            },
-            json={
-                "model": "claude-sonnet-4-6",
-                "max_tokens": 1000,
-                "messages": [{"role": "user", "content": prompt}],
-            },
-            timeout=30,
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        message = client.messages.create(
+            model="claude-opus-4-6",
+            max_tokens=1000,
+            messages=[{"role": "user", "content": prompt}],
         )
-        resp.raise_for_status()
-        content = resp.json()["content"][0]["text"]
-        # JSON 파싱 (```json 펜스 제거)
+        content = message.content[0].text
         clean = content.strip().removeprefix("```json").removesuffix("```").strip()
         return json.loads(clean)
     except Exception as e:
