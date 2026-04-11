@@ -255,6 +255,7 @@ def run_chart_scan(favored_sectors: list = None, min_score: int = 40) -> list:
     차트 스캔 전체 실행.
     S&P 500 → 시가총액 $10B+ 필터 → 차트 조건 병렬 스캔
     """
+    import time
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     universe = get_scan_universe(favored_sectors)
@@ -263,7 +264,7 @@ def run_chart_scan(favored_sectors: list = None, min_score: int = 40) -> list:
     results = []
     completed = 0
 
-    with ThreadPoolExecutor(max_workers=10) as executor:
+    with ThreadPoolExecutor(max_workers=5) as executor:
         future_to_ticker = {executor.submit(scan_ticker, t): t for t in universe}
         for future in as_completed(future_to_ticker):
             completed += 1
@@ -277,8 +278,9 @@ def run_chart_scan(favored_sectors: list = None, min_score: int = 40) -> list:
                     )
             except Exception:
                 pass
-            if completed % 50 == 0:
+            if completed % 100 == 0:
                 logger.info(f"  ... {completed}/{len(universe)} 스캔 완료")
+                time.sleep(1)  # Rate limit 방지용 딜레이
 
     results.sort(key=lambda x: x["chart_score"], reverse=True)
 
