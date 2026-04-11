@@ -42,12 +42,23 @@ MIN_MARKET_CAP = 10_000_000_000  # $10B 이상 대형주
 
 
 def fetch_sp500_tickers() -> list:
-    """Wikipedia에서 S&P 500 전종목 실시간 수집"""
+    """Wikipedia에서 S&P 500 전종목 실시간 수집 (브라우저 헤더로 403 우회)"""
     try:
-        tables = pd.read_html(
+        import io
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            )
+        }
+        resp = requests.get(
             "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
-            flavor="lxml",
+            headers=headers,
+            timeout=15,
         )
+        resp.raise_for_status()
+        tables = pd.read_html(io.StringIO(resp.text), flavor="lxml")
         tickers = tables[0]["Symbol"].str.replace(".", "-", regex=False).tolist()
         logger.info(f"S&P 500 수집 완료: {len(tickers)}종목")
         return tickers
