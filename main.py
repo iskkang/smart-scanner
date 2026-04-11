@@ -39,7 +39,7 @@ def run_full_scan():
     logger.info("\n[2/7] 차트 스캔")
     try:
         from chart_scanner import run_chart_scan
-        chart_passed = run_chart_scan(favored_sectors=favored)
+        chart_passed = run_chart_scan(favored_sectors=favored, macro_data=macro)
         tickers = [r["ticker"] for r in chart_passed]
         logger.info(f"  차트 통과: {len(tickers)}종목")
     except Exception as e:
