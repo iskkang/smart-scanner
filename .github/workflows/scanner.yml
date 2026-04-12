@@ -2,10 +2,12 @@ name: SMART SCANNER
 
 on:
   schedule:
-    # 평일 오전 7:00 KST (전일 22:00 UTC) — 전체 스캔
+    # 07:00 KST (22:00 UTC) 월~금 — 전체 스캔 (정규장 마감 2시간 후, 종가 확정)
     - cron: '0 22 * * 0-4'
-    # 평일 오전 9:00 KST (00:00 UTC) — 포지션 트래킹 + 아침 리포트
-    - cron: '0 0 * * 1-5'
+    # 01:30 KST (16:30 UTC) 화~토 — 장중 포지션 트래킹 (손절/익절 즉시 알림)
+    - cron: '30 16 * * 1-5'
+    # 21:30 KST (12:30 UTC) 월~금 — 장전 패닉스캔 (개장 1시간 전, 뉴스 반영)
+    - cron: '30 12 * * 1-5'
 
   workflow_dispatch:
     inputs:
@@ -70,10 +72,15 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "schedule" ]; then
             HOUR=$(date -u +%H)
-            if [ "$HOUR" = "22" ]; then
-              CMD="scan"
+            MIN=$(date -u +%M)
+            if [ "$HOUR" = "22" ] && [ "$MIN" = "00" ]; then
+              CMD="scan"       # 07:00 KST — 전체 스캔
+            elif [ "$HOUR" = "16" ] && [ "$MIN" = "30" ]; then
+              CMD="track"      # 01:30 KST — 장중 트래킹
+            elif [ "$HOUR" = "12" ] && [ "$MIN" = "30" ]; then
+              CMD="panic"      # 21:30 KST — 장전 패닉스캔
             else
-              CMD="track"
+              CMD="track"      # 폴백
             fi
           else
             CMD="${{ github.event.inputs.command }}"
