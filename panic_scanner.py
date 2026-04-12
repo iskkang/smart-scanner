@@ -381,7 +381,7 @@ def analyze_drop_cause(ticker: str, data: dict) -> dict:
         try:
             client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
             message = client.messages.create(
-                model="claude-opus-4-6",
+                model="claude-sonnet-4-6",
                 max_tokens=1000,
                 messages=[{
                     "role": "user",
