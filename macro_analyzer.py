@@ -112,6 +112,48 @@ def calc_oil_change_pct(period: str = "3mo") -> Optional[float]:
         return None
 
 
+def calc_oil_trend() -> dict:
+    """
+    유가 단기 추세 분석.
+    3개월 변동률은 후행 — 최근 1개월/2주 추세로 현재 방향 판단.
+
+    trend 판정:
+      DECLINING : 1개월 -8% 이하 OR 2주 -5% 이하 (하락 중)
+      SURGING   : 1개월 +8% 이상 AND 최근 방향도 상승
+      STABLE    : 그 외
+    """
+    try:
+        hist = yf.Ticker("CL=F").history(period="3mo")
+        if len(hist) < 10:
+            return {"oil_change_1m_pct": None, "oil_change_2w_pct": None, "oil_trend": "STABLE"}
+
+        current = float(hist["Close"].iloc[-1])
+        price_1m  = float(hist["Close"].iloc[-22]) if len(hist) >= 22 else float(hist["Close"].iloc[0])
+        price_2w  = float(hist["Close"].iloc[-10]) if len(hist) >= 10 else float(hist["Close"].iloc[0])
+        price_peak = float(hist["Close"].max())
+
+        chg_1m = round((current - price_1m) / price_1m * 100, 2)
+        chg_2w = round((current - price_2w) / price_2w * 100, 2)
+        # 고점 대비 낙폭
+        from_peak = round((current - price_peak) / price_peak * 100, 2)
+
+        if chg_1m <= -8 or chg_2w <= -5 or from_peak <= -15:
+            trend = "DECLINING"
+        elif chg_1m >= 8 and chg_2w >= 0:
+            trend = "SURGING"
+        else:
+            trend = "STABLE"
+
+        return {
+            "oil_change_1m_pct": chg_1m,
+            "oil_change_2w_pct": chg_2w,
+            "oil_from_peak_pct": from_peak,
+            "oil_trend": trend,
+        }
+    except Exception as e:
+        return {"oil_change_1m_pct": None, "oil_change_2w_pct": None, "oil_trend": "STABLE"}
+
+
 # ── 거시 데이터 전체 수집 ──────────────────────────────────────
 
 def collect_macro_data() -> dict:
@@ -133,8 +175,10 @@ def collect_macro_data() -> dict:
     # S&P500 연속 상승일
     data["sp500_consecutive_up"] = calc_sp500_consecutive_up_days()
 
-    # 유가 변동률
+    # 유가 변동률 + 단기 추세
     data["oil_change_3m_pct"] = calc_oil_change_pct()
+    oil_trend_data = calc_oil_trend()
+    data.update(oil_trend_data)
 
     # 섹터 수익률
     data["sector_returns_1m"] = calc_sector_1m_returns()
@@ -150,9 +194,17 @@ def rule_based_sector_hints(data: dict) -> dict:
     favored = set()
     avoid = set()
 
-    # 유가 급등
-    oil_chg = data.get("oil_change_3m_pct")
-    if oil_chg and oil_chg > 20:
+    # 유가 추세 (3개월 변동률 + 단기 추세 조합)
+    oil_chg_3m = data.get("oil_change_3m_pct")
+    oil_trend  = data.get("oil_trend", "STABLE")
+    oil_chg_1m = data.get("oil_change_1m_pct")
+
+    if oil_trend == "DECLINING":
+        # 유가 하락 중 → 에너지 회피 (3개월 수치가 양수여도 무시)
+        avoid.update(["XLE"])
+        logger.info(f"  유가 하락 감지 (1m={oil_chg_1m}%) → XLE 회피섹터로 전환")
+    elif oil_trend == "SURGING" and oil_chg_3m and oil_chg_3m > 20:
+        # 유가 실제 상승 중 → 에너지 수혜
         favored.update(["XLE"])
         avoid.update(["XLI", "XLY"])
 
