@@ -118,29 +118,13 @@ def build_daily_report() -> str:
         for r in valuation.get("passed", []):
             val_map[r["ticker"]] = r
 
-    # ── 섹터당 최대 2종목 캡 적용 ──
-    def apply_sector_cap(recs: list, max_per_sector: int = 2) -> list:
-        sector_count = {}
-        result = []
-        for rec in recs:
-            t = rec["ticker"]
-            sector = val_map.get(t, {}).get("sector_code", "GENERAL")
-            cnt = sector_count.get(sector, 0)
-            if cnt < max_per_sector:
-                result.append(rec)
-                sector_count[sector] = cnt + 1
-            if len(result) >= 5:
-                break
-        return result
-
-    top5 = apply_sector_cap(passed)
-    lines.append(f"📡 <b>오늘의 최종 추천</b> ({len(top5)}종목 / 전체 {len(passed)}종목 통과)")
+    lines.append(f"📡 <b>오늘의 최종 추천</b> ({len(passed)}종목)")
     lines.append("")
 
-    if not top5:
+    if not passed:
         lines.append("  조건 충족 종목 없음")
     else:
-        for i, rec in enumerate(top5, 1):
+        for i, rec in enumerate(passed[:5], 1):
             t = rec["ticker"]
             chart_info = chart_map.get(t, {})
             val_info   = val_map.get(t, {})
@@ -203,6 +187,28 @@ def build_daily_report() -> str:
 
     lines.append("")
     lines.append("━" * 30)
+
+    # ── OB Touch & Bounce 섹션 ──
+    ob_data = _load_json("data/ob_scan.json")
+    ob_results = ob_data.get("results", []) if ob_data else []
+    if ob_results:
+        lines.append("")
+        lines.append(f"🎯 <b>Order Block Touch & Bounce</b> ({len(ob_results)}종목)")
+        lines.append("")
+        for r in ob_results[:5]:
+            ob = r.get("ob_zone", {})
+            signals = " | ".join(r.get("ob_signals", [])[:2])
+            lines.append(
+                f"  📍 <b>{r['ticker']}</b>  점수 {r.get('ob_score', 0)}점
+"
+                f"     현재가: ${r.get('price', 'N/A')} | OB: ${ob.get('low', '?')}~${ob.get('high', '?')}
+"
+                f"     반등: +{r.get('bounce_pct', 0)}% | 거래량: {r.get('vol_ratio', 0)}x
+"
+                f"     {signals}"
+            )
+            lines.append("")
+        lines.append("━" * 30)
 
     return "\n".join(lines)
 
