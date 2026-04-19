@@ -94,32 +94,44 @@ def filter_by_market_cap(tickers: list, min_cap: int = MIN_MARKET_CAP) -> list:
     return result
 
 
-def get_scan_universe(favored_sectors: list = None) -> list:
+def get_scan_universe(favored_sectors: list = None, rated_universe: list = None) -> list:
     """
-    스캔 유니버스 구성:
-    1. S&P 500 전종목 수집 (Wikipedia)
-    2. 시가총액 $10B+ 필터
-    3. 수혜 섹터 종목을 앞으로 배치 (우선 스캔, 제외 아님)
+    스캔 유니버스 구성 우선순위:
+    1. 외부 등급 유니버스 (Zacks/SA/Morningstar Strong Buy) — 최우선
+    2. S&P 500 전종목 (Wikipedia) + 시가총액 필터 — 폴백
+    3. 내장 유니버스 — 최후 폴백
+    수혜 섹터 종목은 앞으로 배치 (우선 스캔)
     """
-    sp500 = fetch_sp500_tickers()
+    # ── 1순위: 외부 등급 유니버스 ──
+    if rated_universe and len(rated_universe) > 0:
+        logger.info(f"외부 등급 유니버스 사용: {len(rated_universe)}종목")
+        universe = rated_universe
+        if favored_sectors:
+            priority = set()
+            for sector in favored_sectors:
+                priority.update(SECTOR_UNIVERSE.get(sector, []))
+            front = [t for t in universe if t in priority]
+            rest  = [t for t in universe if t not in priority]
+            logger.info(f"  수혜섹터 우선배치: {len(front)}종목")
+            return front + rest
+        return universe
 
+    # ── 2순위: S&P500 동적 수집 ──
+    logger.info("외부 유니버스 없음 — S&P500 폴백")
+    sp500 = fetch_sp500_tickers()
     if not sp500:
-        # 폴백: 내장 유니버스 전체
         all_tickers = []
         for v in SECTOR_UNIVERSE.values():
             all_tickers.extend(v)
         return sorted(set(all_tickers))
 
     universe = filter_by_market_cap(sp500, MIN_MARKET_CAP)
-
     if not favored_sectors:
         return universe
 
-    # 수혜 섹터 종목 앞으로 배치
     priority = set()
     for sector in favored_sectors:
         priority.update(SECTOR_UNIVERSE.get(sector, []))
-
     front = [t for t in universe if t in priority]
     rest  = [t for t in universe if t not in priority]
     return front + rest
@@ -345,7 +357,7 @@ def scan_ticker(ticker: str, thresholds: dict = None) -> Optional[dict]:
 
 # ── 전체 스캔 실행 ─────────────────────────────────────────────
 
-def run_chart_scan(favored_sectors: list = None, min_score: int = 40, macro_data: dict = None) -> list:
+def run_chart_scan(favored_sectors: list = None, min_score: int = 40, macro_data: dict = None, rated_universe: list = None) -> list:
     """
     차트 스캔 전체 실행.
     macro_data: macro_analyzer 결과 (VIX + 리스크 레벨 기반 동적 임계치 적용)
@@ -356,7 +368,7 @@ def run_chart_scan(favored_sectors: list = None, min_score: int = 40, macro_data
     thresholds = get_dynamic_thresholds(macro_data)
     effective_min_score = thresholds["min_score"]
 
-    universe = get_scan_universe(favored_sectors)
+    universe = get_scan_universe(favored_sectors, rated_universe=rated_universe)
     logger.info(
         f"차트 스캔 시작 — 대상 {len(universe)}종목 | "
         f"레짐 {thresholds['regime']} | "
