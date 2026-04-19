@@ -24,18 +24,6 @@ def run_full_scan():
 
     os.makedirs("data", exist_ok=True)
 
-    # ── 0단계: 외부 등급 유니버스 구성 ──
-    logger.info("\n[0/7] 외부 등급 유니버스 구성 (Zacks / Finviz / Morningstar / yfinance)")
-    rated_universe = []
-    try:
-        from universe_builder import load_or_build_universe
-        rated_universe = load_or_build_universe()
-        logger.info(f"  유니버스 구성 완료: {len(rated_universe)}종목")
-        if not rated_universe:
-            logger.warning("  Strong Buy 유니버스 수집 실패 — S&P500 폴백 사용")
-    except Exception as e:
-        logger.error(f"  유니버스 구성 실패 — S&P500 폴백: {e}")
-
     # ── 1단계: 거시환경 분석 ──
     logger.info("\n[1/7] 거시환경 분석")
     try:
@@ -51,7 +39,7 @@ def run_full_scan():
     logger.info("\n[2/7] 차트 스캔")
     try:
         from chart_scanner import run_chart_scan
-        chart_passed = run_chart_scan(favored_sectors=favored, macro_data=macro, rated_universe=rated_universe)
+        chart_passed = run_chart_scan(favored_sectors=favored, macro_data=macro)
         tickers = [r["ticker"] for r in chart_passed]
         logger.info(f"  차트 통과: {len(tickers)}종목")
     except Exception as e:
@@ -133,6 +121,27 @@ def run_full_scan():
         logger.error(f"  백테스팅 실패: {e}")
         final_passed = []
 
+    # ── OB 스캔 (전체 rated_universe 대상 별도 실행) ──
+    logger.info("\nOB Touch & Bounce 스캔")
+    ob_results = []
+    try:
+        from ob_scanner import run_ob_scan
+        scan_universe = rated_universe if rated_universe else tickers
+        ob_results = run_ob_scan(scan_universe, min_score=50)
+        logger.info(f"  OB 패턴 감지: {len(ob_results)}종목")
+        # 결과 저장
+        import json
+        os.makedirs("data", exist_ok=True)
+        with open("data/ob_scan.json", "w", encoding="utf-8") as f:
+            json.dump({
+                "timestamp": __import__("datetime").datetime.now().isoformat(),
+                "scanned": len(scan_universe),
+                "passed": len(ob_results),
+                "results": ob_results,
+            }, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"  OB 스캔 실패: {e}")
+
     # ── 리포트 전송 ──
     logger.info("\n리포트 전송")
     try:
@@ -188,25 +197,6 @@ def run_panic_scan_cmd(tickers: list = None):
         logger.error(f"패닉 스캔 실패: {e}")
 
 
-def run_ob_scan_cmd(tickers: list = None):
-    """Order Block Touch & Bounce 패턴 스캔"""
-    logger.info("OB Touch & Bounce 스캔 실행")
-    try:
-        # 유니버스 로드
-        if not tickers:
-            from universe_builder import load_or_build_universe
-            tickers = load_or_build_universe()
-
-        from ob_scanner import run_ob_scan, format_ob_report
-        results = run_ob_scan(tickers)
-
-        from notifier import send_telegram
-        report = format_ob_report(results)
-        send_telegram(report)
-    except Exception as e:
-        logger.error(f"OB 스캔 실패: {e}")
-
-
 def run_remove(ticker: str, reason: str = "수동 정리"):
     """종목 제거"""
     from position_manager import remove_position
@@ -232,12 +222,9 @@ if __name__ == "__main__":
     elif cmd == "portfolio":
         run_portfolio()
     elif cmd == "panic":
+        # 특정 종목 지정 가능: python main.py panic SNDK AMKR MU
         tickers = [t.upper() for t in sys.argv[2:]] if len(sys.argv) > 2 else None
         run_panic_scan_cmd(tickers)
-    elif cmd == "ob":
-        # OB Touch & Bounce 스캔: python main.py ob [TICKER ...]
-        tickers = [t.upper() for t in sys.argv[2:]] if len(sys.argv) > 2 else None
-        run_ob_scan_cmd(tickers)
     elif cmd == "add" and len(sys.argv) >= 4:
         run_add(sys.argv[2], float(sys.argv[3]), int(sys.argv[4]) if len(sys.argv) > 4 else 0)
     elif cmd == "remove" and len(sys.argv) >= 3:
@@ -248,10 +235,8 @@ SMART SCANNER 사용법:
   python main.py scan                        — 전체 스캔 실행
   python main.py track                       — 포지션 트래킹 + 아침 리포트
   python main.py portfolio                   — 포트폴리오 현황
-  python main.py panic                       — 패닉 셀 저가 매수 스캔
+  python main.py panic                       — 패닉 셀 저가 매수 스캔 (S&P500 전체)
   python main.py panic SNDK AMKR MU          — 특정 종목만 패닉 스캔
-  python main.py ob                           — Order Block Touch & Bounce 스캔
-  python main.py ob SNDK BKR NVDA            — 특정 종목만 OB 스캔
   python main.py add TICKER PRICE [SHARES]   — 종목 추가
   python main.py remove TICKER [REASON]      — 종목 제거
         """)
