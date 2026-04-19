@@ -23,6 +23,15 @@ def run_full_scan():
     logger.info("=" * 50)
 
     os.makedirs("data", exist_ok=True)
+    rated_universe = []  # 초기화 (universe_builder 없어도 안전)
+
+    # ── 0단계: 외부 등급 유니버스 구성 (선택) ──
+    try:
+        from universe_builder import load_or_build_universe
+        rated_universe = load_or_build_universe()
+        logger.info(f"\n[0/7] 외부 등급 유니버스: {len(rated_universe)}종목")
+    except Exception as e:
+        logger.warning(f"유니버스 빌더 스킵 — S&P500 폴백 사용: {e}")
 
     # ── 1단계: 거시환경 분석 ──
     logger.info("\n[1/7] 거시환경 분석")
@@ -39,7 +48,7 @@ def run_full_scan():
     logger.info("\n[2/7] 차트 스캔")
     try:
         from chart_scanner import run_chart_scan
-        chart_passed = run_chart_scan(favored_sectors=favored, macro_data=macro)
+        chart_passed = run_chart_scan(favored_sectors=favored, macro_data=macro, rated_universe=rated_universe)
         tickers = [r["ticker"] for r in chart_passed]
         logger.info(f"  차트 통과: {len(tickers)}종목")
     except Exception as e:
@@ -126,7 +135,7 @@ def run_full_scan():
     ob_results = []
     try:
         from ob_scanner import run_ob_scan
-        scan_universe = rated_universe if rated_universe else tickers
+        scan_universe = rated_universe if rated_universe else (tickers if tickers else [])
         ob_results = run_ob_scan(scan_universe, min_score=50)
         logger.info(f"  OB 패턴 감지: {len(ob_results)}종목")
         # 결과 저장
@@ -145,8 +154,9 @@ def run_full_scan():
     # ── 리포트 전송 ──
     logger.info("\n리포트 전송")
     try:
-        from notifier import send_daily_report
-        send_daily_report()
+        from notifier import send_daily_report, send_ob_report
+        send_daily_report()   # ① 기존 추천 리포트
+        send_ob_report()      # ② OB 패턴 별도 메시지
     except Exception as e:
         logger.error(f"  리포트 전송 실패: {e}")
 
