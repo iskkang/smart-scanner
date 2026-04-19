@@ -188,28 +188,6 @@ def build_daily_report() -> str:
     lines.append("")
     lines.append("━" * 30)
 
-    # ── OB Touch & Bounce 섹션 ──
-    ob_data = _load_json("data/ob_scan.json")
-    ob_results = ob_data.get("results", []) if ob_data else []
-    if ob_results:
-        lines.append("")
-        lines.append(f"🎯 <b>Order Block Touch & Bounce</b> ({len(ob_results)}종목)")
-        lines.append("")
-        for r in ob_results[:5]:
-            ob = r.get("ob_zone", {})
-            signals = " | ".join(r.get("ob_signals", [])[:2])
-            lines.append(
-                f"  📍 <b>{r['ticker']}</b>  점수 {r.get('ob_score', 0)}점
-"
-                f"     현재가: ${r.get('price', 'N/A')} | OB: ${ob.get('low', '?')}~${ob.get('high', '?')}
-"
-                f"     반등: +{r.get('bounce_pct', 0)}% | 거래량: {r.get('vol_ratio', 0)}x
-"
-                f"     {signals}"
-            )
-            lines.append("")
-        lines.append("━" * 30)
-
     return "\n".join(lines)
 
 
@@ -253,6 +231,43 @@ def send_daily_report():
     logger.info("매일 아침 리포트 전송")
     send_telegram(report)
     return report
+
+
+def build_ob_report() -> str:
+    """OB Touch & Bounce 별도 리포트 빌드"""
+    ob_data = _load_json("data/ob_scan.json")
+    if not ob_data:
+        return ""
+    results = ob_data.get("results", [])
+    if not results:
+        return ""
+
+    lines = [
+        "🎯 <b>Order Block Touch &amp; Bounce 패턴</b>",
+        f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M')} KST",
+        "━" * 30,
+        "",
+    ]
+    for i, r in enumerate(results[:5], 1):
+        ob = r.get("ob_zone", {})
+        signals = " | ".join(r.get("ob_signals", [])[:3])
+        lines.append(f"{i}. <b>{r['ticker']}</b>  OB점수 {r.get('ob_score', 0)}점")
+        lines.append(f"   현재가: ${r.get('price', 'N/A')} | 52주고점대비: {r.get('from_52w_high_pct', 'N/A')}%")
+        lines.append(f"   OB구간: ${ob.get('low', '?')} ~ ${ob.get('high', '?')}")
+        lines.append(f"   반등: +{r.get('bounce_pct', 0)}% | 거래량: {r.get('vol_ratio', 0)}x")
+        lines.append(f"   신호: {signals}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def send_ob_report():
+    """OB 리포트 별도 메시지로 전송"""
+    report = build_ob_report()
+    if report:
+        logger.info("OB Touch & Bounce 리포트 전송")
+        send_telegram(report)
+    else:
+        logger.info("OB 패턴 감지 종목 없음 — 전송 스킵")
 
 
 def send_position_alerts():
