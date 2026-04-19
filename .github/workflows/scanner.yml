@@ -19,6 +19,7 @@ on:
           - track
           - portfolio
           - panic
+          - ob
           - add
           - remove
       ticker:
