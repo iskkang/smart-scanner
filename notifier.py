@@ -118,13 +118,29 @@ def build_daily_report() -> str:
         for r in valuation.get("passed", []):
             val_map[r["ticker"]] = r
 
-    lines.append(f"📡 <b>오늘의 최종 추천</b> ({len(passed)}종목)")
+    # ── 섹터당 최대 2종목 캡 적용 ──
+    def apply_sector_cap(recs: list, max_per_sector: int = 2) -> list:
+        sector_count = {}
+        result = []
+        for rec in recs:
+            t = rec["ticker"]
+            sector = val_map.get(t, {}).get("sector_code", "GENERAL")
+            cnt = sector_count.get(sector, 0)
+            if cnt < max_per_sector:
+                result.append(rec)
+                sector_count[sector] = cnt + 1
+            if len(result) >= 5:
+                break
+        return result
+
+    top5 = apply_sector_cap(passed)
+    lines.append(f"📡 <b>오늘의 최종 추천</b> ({len(top5)}종목 / 전체 {len(passed)}종목 통과)")
     lines.append("")
 
-    if not passed:
+    if not top5:
         lines.append("  조건 충족 종목 없음")
     else:
-        for i, rec in enumerate(passed[:5], 1):
+        for i, rec in enumerate(top5, 1):
             t = rec["ticker"]
             chart_info = chart_map.get(t, {})
             val_info   = val_map.get(t, {})
