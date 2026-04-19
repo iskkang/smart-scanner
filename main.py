@@ -1,6 +1,7 @@
 """
 SMART SCANNER — 메인 오케스트레이터 (main.py)
 전체 파이프라인 순차 실행:
+  0. 외부 등급 유니버스 구성 (Zacks/SA/Morningstar Strong Buy)
   1. 거시환경 분석 → 2. 차트 스캔 → 3. 밸류에이션 →
   4. 기관 동향 → 5. 뉴스/공매도 → 6. 월가 리포트 →
   7. 백테스팅 → 8. 텔레그램 리포트
@@ -24,6 +25,18 @@ def run_full_scan():
 
     os.makedirs("data", exist_ok=True)
 
+    # ── 0단계: 외부 등급 유니버스 구성 ──
+    logger.info("\n[0/7] 외부 등급 유니버스 구성 (Zacks / Seeking Alpha / Morningstar / Investing.com)")
+    rated_universe = []
+    try:
+        from universe_builder import load_or_build_universe
+        rated_universe = load_or_build_universe()
+        logger.info(f"  유니버스 구성 완료: {len(rated_universe)}종목")
+        if not rated_universe:
+            logger.warning("  Strong Buy 유니버스 수집 실패 — S&P500 폴백 사용")
+    except Exception as e:
+        logger.error(f"  유니버스 구성 실패 — S&P500 폴백: {e}")
+
     # ── 1단계: 거시환경 분석 ──
     logger.info("\n[1/7] 거시환경 분석")
     try:
@@ -39,7 +52,7 @@ def run_full_scan():
     logger.info("\n[2/7] 차트 스캔")
     try:
         from chart_scanner import run_chart_scan
-        chart_passed = run_chart_scan(favored_sectors=favored, macro_data=macro)
+        chart_passed = run_chart_scan(favored_sectors=favored, macro_data=macro, rated_universe=rated_universe)
         tickers = [r["ticker"] for r in chart_passed]
         logger.info(f"  차트 통과: {len(tickers)}종목")
     except Exception as e:
@@ -108,6 +121,21 @@ def run_full_scan():
 
     if not tickers:
         logger.info("월가 검증 통과 종목 없음 — 스캔 종료")
+        _send_empty_report()
+        return
+
+    # ── 6.5단계: 외부 등급 교차검증 (Zacks/SA/Morningstar) ──
+    logger.info(f"\n[6.5/7] 외부 등급 교차검증 ({len(tickers)}종목)")
+    try:
+        from ratings_checker import run_ratings_check
+        rated_passed = run_ratings_check(tickers)
+        tickers = [r["ticker"] for r in rated_passed]
+        logger.info(f"  외부 등급 통과: {len(tickers)}종목")
+    except Exception as e:
+        logger.error(f"  외부 등급 검증 실패 — 이전 통과 종목 유지: {e}")
+
+    if not tickers:
+        logger.info("외부 등급 통과 종목 없음 — 스캔 종료")
         _send_empty_report()
         return
 
