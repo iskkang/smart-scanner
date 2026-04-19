@@ -1,351 +1,378 @@
 """
-ob_scanner.py — Order Block Touch & Bounce 패턴 스캐너
+universe_builder.py — Strong Buy 유니버스 구성 (4개 소스)
 
-패턴 정의:
-  1. 상승 추세 확립 (BOS: Break of Structure)
-  2. 직전 BOS 이전 마지막 베어리시 캔들 = Order Block
-  3. 가격이 OB 구간에 닿음 (터치)
-  4. OB에서 반등 신호 (불리시 캔들 + 거래량 증가)
+소스별 방법:
+  1. Zacks       → Claude web_search ("Zacks Rank 1 Strong Buy stocks")
+  2. Finviz      → 스크리너 직접 요청 (an_recom_strongbuy 필터, 무료)
+  3. Morningstar → Claude web_search ("Morningstar 5-star undervalued stocks")
+  4. yfinance    → S&P500 대형주 중 recommendationMean ≤ 2.0 (Buy 이상)
 
-실행: python main.py 에서 scan 내에 통합 또는 독립 실행 가능
+합산 → 중복 제거 → Universe 반환
 """
 
+import io
 import json
 import logging
 import os
+import re
 import time
 from datetime import datetime
 from typing import Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import numpy as np
+import requests
 import pandas as pd
 import yfinance as yf
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+
+TICKER_PATTERN = re.compile(r'\b([A-Z]{1,5})\b')
+EXCLUDE_WORDS = {
+    "A","I","AN","AT","BE","BY","DO","GO","IF","IN","IS","IT","ME","MY",
+    "NO","OF","ON","OR","SO","TO","UP","US","WE","CEO","CFO","CTO","ETF",
+    "IPO","SEC","USA","USD","GDP","CPI","API","AI","PE","EPS","ROE","ROA",
+    "EV","EBIT","TTM","YTD","QOQ","YOY","BUY","SELL","HOLD","NYSE","NASDAQ",
+    "SP","SMA","RSI","VIX","WTI","DXY","KST","UTC","EST","PST","Q1","Q2",
+    "Q3","Q4","H1","H2","FY","LTM","NTM","DCF","CAGR","STRONG","TOP","NEW",
+    "OLD","THE","AND","FOR","FROM","WITH","RANK","STAR","BEST","HIGH","LOW",
+    "ALL","ANY","GET","SET","PUT","INC","LLC","LTD","PLC","NV","SE","SA",
+    "CO","AG","AB","AS","DE","LA","LE","EL","DI","IL","UN","RE","BI","EX",
+}
+
 
 # ═══════════════════════════════════════════════════════════════
-# Order Block 감지
+# 소스 1: Zacks — Claude web_search
 # ═══════════════════════════════════════════════════════════════
 
-def detect_order_blocks(hist: pd.DataFrame, swing_period: int = 20) -> list:
-    """
-    Order Block 감지 알고리즘:
-    1. 스윙 고점 돌파(BOS) 구간 탐색
-    2. 돌파 직전 마지막 베어리시 캔들 = Bullish Order Block
-    3. OB 구간: [캔들 저가, 캔들 시가(몸통 상단)]
-
-    반환: OB 리스트 (최신 순)
-    """
-    if len(hist) < swing_period + 10:
+def fetch_zacks() -> list:
+    """Zacks Rank #1 Strong Buy 종목 수집 (Claude web_search)"""
+    if not ANTHROPIC_API_KEY:
         return []
 
-    close = hist["Close"]
-    open_ = hist["Open"]
-    high  = hist["High"]
-    low   = hist["Low"]
-    vol   = hist["Volume"]
+    prompt = """web_search로 검색하세요: "Zacks Rank 1 Strong Buy stocks list today 2026"
 
-    obs = []
+Zacks Rank #1 (Strong Buy) 종목들의 티커 심볼 목록을 찾아 JSON 배열로만 반환하세요.
+예: ["AAPL", "MSFT", "XOM"]
+JSON 배열 외 다른 텍스트 없이. 못 찾으면 [] 반환."""
 
-    for i in range(swing_period, len(hist) - 3):
-        prev_high = float(high.iloc[i - swing_period:i].max())
-        curr_high = float(high.iloc[i])
-
-        # BOS 조건: 현재 고가가 이전 구간 고점을 2%+ 돌파
-        if curr_high <= prev_high * 1.02:
-            continue
-
-        # BOS 직전 베어리시 캔들 탐색 (최근 7개)
-        for j in range(i - 1, max(i - 8, 0), -1):
-            c = float(close.iloc[j])
-            o = float(open_.iloc[j])
-            if c >= o:  # 불리시 캔들은 스킵
-                continue
-
-            # 베어리시 캔들 발견 = Order Block
-            ob_low  = float(low.iloc[j])
-            ob_high = float(o)         # 몸통 상단 (시가)
-            ob_body = abs(o - c)
-            avg_vol = float(vol.iloc[max(0, j-20):j].mean()) if j > 0 else 1
-            vol_ratio = float(vol.iloc[j]) / avg_vol if avg_vol > 0 else 1
-
-            # 이동 폭 (BOS 당시 상승률)
-            move_pct = (curr_high - float(high.iloc[j])) / float(high.iloc[j]) * 100
-
-            obs.append({
-                "ob_idx": j,
-                "ob_date": str(hist.index[j].date()) if hasattr(hist.index[j], 'date') else str(hist.index[j])[:10],
-                "ob_low": round(ob_low, 2),
-                "ob_high": round(ob_high, 2),
-                "ob_mid": round((ob_low + ob_high) / 2, 2),
-                "ob_body_size": round(ob_body, 2),
-                "vol_ratio": round(vol_ratio, 2),
-                "move_pct_after": round(move_pct, 1),
-                "bos_idx": i,
-            })
-            break  # 한 BOS당 하나의 OB
-
-    # 최신 순 정렬, 중복 유사 구간 병합
-    obs.sort(key=lambda x: x["ob_idx"], reverse=True)
-    return obs
-
-
-# ═══════════════════════════════════════════════════════════════
-# OB Touch & Bounce 패턴 감지
-# ═══════════════════════════════════════════════════════════════
-
-def check_ob_touch_bounce(hist: pd.DataFrame) -> Optional[dict]:
-    """
-    현재 가격이 Order Block을 터치 후 반등 중인지 감지.
-
-    조건:
-    A. 상승 추세 유지 (20 > 50 > 200 이평선)
-    B. 최근 저가가 유효한 OB 구간에 닿음 (터치)
-    C. 반등 신호: 현재 캔들이 불리시 + OB 위 마감 + 거래량 증가
-    D. 과도한 하락 아님 (OB 하단을 크게 이탈하지 않음)
-    """
-    if len(hist) < 210:
-        return None
-
-    close = hist["Close"]
-    open_ = hist["Open"]
-    high  = hist["High"]
-    low   = hist["Low"]
-    vol   = hist["Volume"]
-
-    # ── A. 이평선 정배열 확인 ──
-    sma20  = float(close.rolling(20).mean().iloc[-1])
-    sma50  = float(close.rolling(50).mean().iloc[-1])
-    sma200 = float(close.rolling(200).mean().iloc[-1])
-    if not (sma20 > sma50 > sma200):
-        return None
-
-    current    = float(close.iloc[-1])
-    today_open = float(open_.iloc[-1])
-    today_low  = float(low.iloc[-1])
-    today_high = float(high.iloc[-1])
-    vol_today  = float(vol.iloc[-1])
-    vol_5d     = float(vol.iloc[-6:-1].mean())
-    vol_20d    = float(vol.iloc[-21:-1].mean())
-
-    # OB 탐색 (최근 120일 이내만 유효)
-    obs = detect_order_blocks(hist)
-    recent_obs = [ob for ob in obs if ob["ob_idx"] >= len(hist) - 120]
-
-    for ob in recent_obs:
-        ob_low  = ob["ob_low"]
-        ob_high = ob["ob_high"]
-        ob_mid  = ob["ob_mid"]
-        tolerance = (ob_high - ob_low) * 0.3  # 구간의 30% 여유
-
-        # ── B. OB 터치 확인 ──
-        # 최근 저가가 OB 상단 ± 여유 안에 들어옴
-        touched = (today_low <= ob_high + tolerance) and (today_low >= ob_low - tolerance)
-        if not touched:
-            # 직전 1~3일 저가도 확인
-            for lookback in [1, 2, 3]:
-                if len(hist) > lookback:
-                    prev_low = float(low.iloc[-(lookback+1)])
-                    if (prev_low <= ob_high + tolerance) and (prev_low >= ob_low - tolerance):
-                        touched = True
-                        break
-        if not touched:
-            continue
-
-        # ── C. 반등 신호 확인 ──
-        is_bullish    = current > today_open                    # 불리시 캔들
-        above_ob_mid  = current > ob_mid                        # OB 중단 이상 마감
-        vol_surge     = vol_today > vol_5d * 1.2               # 거래량 평균 이상
-
-        if not (is_bullish and above_ob_mid):
-            continue
-
-        # ── D. OB 하단 크게 이탈 안했는지 ──
-        ob_break = today_low < ob_low * 0.97  # 3% 이상 이탈 = 무효화
-        if ob_break:
-            continue
-
-        # ── 점수 산출 ──
-        score = 0
-        signals = []
-
-        # 반등 강도
-        bounce_pct = (current - today_low) / today_low * 100
-        if bounce_pct >= 3:
-            score += 30
-            signals.append(f"강반등 +{bounce_pct:.1f}%")
-        elif bounce_pct >= 1.5:
-            score += 20
-            signals.append(f"반등 +{bounce_pct:.1f}%")
-
-        # 거래량
-        vol_ratio = vol_today / vol_5d if vol_5d > 0 else 1
-        if vol_ratio >= 2.0:
-            score += 25
-            signals.append(f"거래량 폭증 {vol_ratio:.1f}x")
-        elif vol_ratio >= 1.5:
-            score += 15
-            signals.append(f"거래량 증가 {vol_ratio:.1f}x")
-        elif vol_ratio >= 1.2:
-            score += 8
-
-        # OB 품질 (이전 상승 폭)
-        if ob.get("move_pct_after", 0) >= 20:
-            score += 20
-            signals.append(f"강한OB (이후+{ob['move_pct_after']}%)")
-        elif ob.get("move_pct_after", 0) >= 10:
-            score += 10
-
-        # 이평선 정배열 밀착도
-        dist_from_sma20 = abs(current - sma20) / sma20 * 100
-        if dist_from_sma20 <= 3:
-            score += 15
-            signals.append("20일선 근접")
-
-        # 핀바(Pin Bar) / 망치형 캔들
-        candle_range = today_high - today_low
-        lower_wick   = today_open - today_low if today_open > current else current - today_low
-        if candle_range > 0 and lower_wick / candle_range >= 0.6:
-            score += 10
-            signals.append("망치형(Pin Bar)")
-
-        return {
-            "ob_zone": {"low": ob_low, "high": ob_high, "mid": ob_mid},
-            "ob_date": ob.get("ob_date"),
-            "ob_move_after": ob.get("move_pct_after"),
-            "touch_confirmed": True,
-            "bounce_pct": round(bounce_pct, 2),
-            "vol_ratio": round(vol_ratio, 2),
-            "ob_score": min(score, 100),
-            "ob_signals": signals,
-        }
-
-    return None
-
-
-# ═══════════════════════════════════════════════════════════════
-# 개별 종목 스캔
-# ═══════════════════════════════════════════════════════════════
-
-def scan_ob_pattern(ticker: str) -> Optional[dict]:
-    """OB Touch & Bounce 패턴 개별 종목 스캔"""
     try:
-        hist = yf.Ticker(ticker).history(period="1y")
-        if len(hist) < 210:
-            return None
+        resp = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": ANTHROPIC_API_KEY,
+                "content-type": "application/json",
+                "anthropic-version": "2023-06-01",
+                "anthropic-beta": "web-search-2025-03-05",
+            },
+            json={
+                "model": "claude-haiku-4-5-20251001",
+                "max_tokens": 800,
+                "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            timeout=45,
+        )
+        resp.raise_for_status()
+        text = "".join(
+            b.get("text", "") for b in resp.json().get("content", [])
+            if b.get("type") == "text"
+        )
+        return _parse_tickers_from_text(text)
+    except Exception as e:
+        logger.error(f"Zacks 수집 실패: {e}")
+        return []
 
-        ob_result = check_ob_touch_bounce(hist)
-        if not ob_result:
-            return None
 
-        close   = hist["Close"]
-        current = float(close.iloc[-1])
-        high_52 = float(close.max())
-        from_52 = (current - high_52) / high_52 * 100
+# ═══════════════════════════════════════════════════════════════
+# 소스 2: Finviz — 스크리너 직접 요청
+# ═══════════════════════════════════════════════════════════════
 
-        return {
-            "ticker": ticker,
-            "price": round(current, 2),
-            "from_52w_high_pct": round(from_52, 1),
-            **ob_result,
-        }
+def fetch_finviz() -> list:
+    """
+    Finviz 스크리너에서 Strong Buy 컨센서스 종목 수집.
+    URL: https://finviz.com/screener.ashx?v=111&f=an_recom_strongbuy&o=-marketcap
+    """
+    tickers = []
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://finviz.com/",
+    }
+
+    try:
+        # 페이지당 20종목, 최대 3페이지(60종목) 수집
+        for page_offset in [1, 21, 41]:
+            url = (
+                f"https://finviz.com/screener.ashx"
+                f"?v=111&f=an_recom_strongbuy&o=-marketcap&r={page_offset}"
+            )
+            resp = requests.get(url, headers=headers, timeout=15)
+            if resp.status_code != 200:
+                logger.warning(f"Finviz 응답 {resp.status_code} (offset={page_offset})")
+                break
+
+            tables = pd.read_html(io.StringIO(resp.text))
+            # Finviz 스크리너 테이블 찾기 (Ticker 컬럼 포함)
+            for table in tables:
+                cols = [str(c).strip() for c in table.columns]
+                if "Ticker" in cols:
+                    batch = table["Ticker"].dropna().tolist()
+                    tickers.extend([str(t).upper() for t in batch if 1 <= len(str(t)) <= 5])
+                    break
+
+            time.sleep(1.5)  # 요청 간격
+
+        tickers = list(dict.fromkeys(tickers))  # 순서 유지 중복 제거
+        logger.info(f"  [finviz] {len(tickers)}종목 수집: {tickers[:10]}{'...' if len(tickers) > 10 else ''}")
+        return tickers
 
     except Exception as e:
-        logger.error(f"{ticker} OB 스캔 실패: {e}")
+        logger.error(f"Finviz 수집 실패: {e}")
+        return []
+
+
+# ═══════════════════════════════════════════════════════════════
+# 소스 3: Morningstar — Claude web_search
+# ═══════════════════════════════════════════════════════════════
+
+def fetch_morningstar() -> list:
+    """Morningstar 5-star 저평가 종목 수집 (Claude web_search)"""
+    if not ANTHROPIC_API_KEY:
+        return []
+
+    prompt = """web_search로 검색하세요: "Morningstar 5 star undervalued stocks list 2026"
+
+Morningstar 5-star(크게 저평가) 종목들의 티커 심볼을 JSON 배열로만 반환하세요.
+예: ["AAPL", "MSFT", "XOM"]
+JSON 배열 외 다른 텍스트 없이. 못 찾으면 [] 반환."""
+
+    try:
+        resp = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": ANTHROPIC_API_KEY,
+                "content-type": "application/json",
+                "anthropic-version": "2023-06-01",
+                "anthropic-beta": "web-search-2025-03-05",
+            },
+            json={
+                "model": "claude-haiku-4-5-20251001",
+                "max_tokens": 800,
+                "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            timeout=45,
+        )
+        resp.raise_for_status()
+        text = "".join(
+            b.get("text", "") for b in resp.json().get("content", [])
+            if b.get("type") == "text"
+        )
+        return _parse_tickers_from_text(text)
+    except Exception as e:
+        logger.error(f"Morningstar 수집 실패: {e}")
+        return []
+
+
+# ═══════════════════════════════════════════════════════════════
+# 소스 4: yfinance — S&P500 컨센서스 스크리닝
+# ═══════════════════════════════════════════════════════════════
+
+def fetch_yfinance_consensus() -> list:
+    """
+    S&P500 대형주 중 yfinance recommendationMean ≤ 2.0 (Buy 이상) 종목 수집.
+    병렬 처리로 속도 최적화.
+    """
+    # S&P500 티커 수집
+    sp500 = _fetch_sp500_tickers()
+    if not sp500:
+        logger.warning("S&P500 티커 수집 실패 — yfinance 소스 스킵")
+        return []
+
+    logger.info(f"  [yfinance] S&P500 {len(sp500)}종목 컨센서스 스크리닝...")
+
+    strong_buys = []
+
+    def check_consensus(ticker):
+        try:
+            info = yf.Ticker(ticker).info or {}
+            rec = info.get("recommendationMean")
+            n   = info.get("numberOfAnalystOpinions", 0) or 0
+            # 애널리스트 3명 이상 + mean ≤ 2.0 (Strong Buy~Buy)
+            if rec and n >= 3 and rec <= 2.0:
+                return ticker
+        except Exception:
+            pass
         return None
 
-
-# ═══════════════════════════════════════════════════════════════
-# 배치 스캔 실행
-# ═══════════════════════════════════════════════════════════════
-
-def run_ob_scan(tickers: list, min_score: int = 40) -> list:
-    """
-    전체 유니버스 대상 OB Touch & Bounce 스캔.
-    기존 chart_scan 결과나 rated_universe를 입력으로 받음.
-    """
-    logger.info(f"OB Touch & Bounce 스캔 시작 — {len(tickers)}종목")
-
-    results = []
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        futures = {executor.submit(scan_ob_pattern, t): t for t in tickers}
+    with ThreadPoolExecutor(max_workers=15) as executor:
+        futures = {executor.submit(check_consensus, t): t for t in sp500}
         for future in as_completed(futures):
-            try:
-                result = future.result()
-                if result and result["ob_score"] >= min_score:
-                    results.append(result)
-                    logger.info(
-                        f"  🎯 {result['ticker']}: OB점수 {result['ob_score']} | "
-                        f"반등 +{result['bounce_pct']}% | "
-                        f"거래량 {result['vol_ratio']}x | "
-                        f"{result['ob_signals']}"
-                    )
-            except Exception:
-                pass
+            result = future.result()
+            if result:
+                strong_buys.append(result)
 
-    results.sort(key=lambda x: x["ob_score"], reverse=True)
-
-    os.makedirs("data", exist_ok=True)
-    with open("data/ob_scan.json", "w", encoding="utf-8") as f:
-        json.dump({
-            "timestamp": datetime.now().isoformat(),
-            "scanned": len(tickers),
-            "passed": len(results),
-            "results": results,
-        }, f, indent=2, ensure_ascii=False)
-
-    logger.info(f"OB 스캔 완료 — {len(results)}/{len(tickers)} 패턴 감지")
-    return results
+    logger.info(f"  [yfinance] {len(strong_buys)}종목 수집 (recommendationMean ≤ 2.0)")
+    return strong_buys
 
 
-def format_ob_report(results: list) -> str:
-    """텔레그램용 OB 스캔 리포트"""
-    if not results:
-        return "🔍 OB Touch & Bounce 패턴 감지 종목 없음"
+def _fetch_sp500_tickers() -> list:
+    """Wikipedia에서 S&P500 티커 수집"""
+    try:
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            )
+        }
+        resp = requests.get(
+            "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
+            headers=headers, timeout=15,
+        )
+        resp.raise_for_status()
+        tables = pd.read_html(io.StringIO(resp.text), flavor="lxml")
+        tickers = tables[0]["Symbol"].str.replace(".", "-", regex=False).tolist()
+        return tickers
+    except Exception as e:
+        logger.error(f"S&P500 수집 실패: {e}")
+        return []
 
-    lines = [
-        "🎯 <b>Order Block Touch & Bounce 패턴</b>",
-        f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M')} KST",
-        "━" * 30, "",
+
+# ═══════════════════════════════════════════════════════════════
+# 텍스트 파싱 유틸
+# ═══════════════════════════════════════════════════════════════
+
+def _parse_tickers_from_text(text: str) -> list:
+    """텍스트에서 티커 추출 (JSON 배열 우선, 실패 시 정규식)"""
+    if not text:
+        return []
+    clean = text.strip().removeprefix("```json").removesuffix("```").strip()
+
+    # JSON 배열 파싱 시도
+    start = clean.find("[")
+    end   = clean.rfind("]") + 1
+    if start >= 0 and end > start:
+        try:
+            items = json.loads(clean[start:end])
+            valid = [
+                str(t).upper().replace(".", "-")
+                for t in items
+                if isinstance(t, str) and 1 <= len(str(t).strip()) <= 5
+                and str(t).strip().upper() not in EXCLUDE_WORDS
+            ]
+            return valid
+        except Exception:
+            pass
+
+    # 정규식 폴백
+    found = TICKER_PATTERN.findall(text)
+    return list(dict.fromkeys(
+        t for t in found if t not in EXCLUDE_WORDS and len(t) >= 2
+    ))
+
+
+# ═══════════════════════════════════════════════════════════════
+# Universe 통합 구성
+# ═══════════════════════════════════════════════════════════════
+
+def build_rated_universe(min_sources: int = 1) -> dict:
+    """
+    4개 소스에서 Strong Buy 종목 수집 후 Universe 구성.
+    min_sources: 최소 언급 소스 수 (1 = 하나라도 있으면 포함)
+    """
+    logger.info("외부 등급 유니버스 구성 시작")
+
+    source_results = {}
+    ticker_sources = {}  # ticker → [source, ...]
+
+    # ── 순차 실행 (API rate limit 고려) ──
+    sources = [
+        ("zacks",     fetch_zacks),
+        ("finviz",    fetch_finviz),
+        ("morningstar", fetch_morningstar),
+        ("yfinance",  fetch_yfinance_consensus),
     ]
 
-    for i, r in enumerate(results[:5], 1):
-        ob = r["ob_zone"]
-        lines.append(f"{i}. <b>{r['ticker']}</b>  OB점수 {r['ob_score']}점")
-        lines.append(f"   현재가: ${r['price']} | 52주고점대비: {r['from_52w_high_pct']}%")
-        lines.append(f"   OB구간: ${ob['low']} ~ ${ob['high']}")
-        lines.append(f"   반등: +{r['bounce_pct']}% | 거래량: {r['vol_ratio']}x")
-        lines.append(f"   신호: {' | '.join(r['ob_signals'])}")
-        lines.append("")
+    for name, fn in sources:
+        logger.info(f"  [{name}] 수집 중...")
+        try:
+            tickers = fn()
+        except Exception as e:
+            logger.error(f"  [{name}] 실패: {e}")
+            tickers = []
 
-    return "\n".join(lines)
+        source_results[name] = tickers
+        logger.info(f"  [{name}] {len(tickers)}종목: {tickers[:8]}{'...' if len(tickers) > 8 else ''}")
+
+        for t in tickers:
+            ticker_sources.setdefault(t, [])
+            if name not in ticker_sources[t]:
+                ticker_sources[t].append(name)
+
+        time.sleep(2)
+
+    # min_sources 이상 언급 종목 필터
+    universe = [
+        t for t, srcs in ticker_sources.items()
+        if len(srcs) >= min_sources
+    ]
+    # 다중 소스 언급 순으로 정렬 (신뢰도 높은 것 먼저)
+    universe.sort(key=lambda t: len(ticker_sources[t]), reverse=True)
+
+    multi = [t for t in universe if len(ticker_sources[t]) >= 2]
+    logger.info(
+        f"유니버스 완료: 총 {len(universe)}종목 | "
+        f"2개+ 소스: {len(multi)}종목 → {multi[:15]}"
+    )
+    for name, tickers in source_results.items():
+        logger.info(f"  {name}: {len(tickers)}종목")
+
+    result = {
+        "timestamp": datetime.now().isoformat(),
+        "source_results": source_results,
+        "ticker_sources": ticker_sources,
+        "universe": universe,
+        "universe_size": len(universe),
+        "multi_source_tickers": multi,
+    }
+
+    os.makedirs("data", exist_ok=True)
+    with open("data/rated_universe.json", "w", encoding="utf-8") as f:
+        json.dump(result, f, indent=2, ensure_ascii=False)
+
+    return result
+
+
+def load_or_build_universe(max_age_hours: int = 23) -> list:
+    """당일 캐시 재사용 (재수집 불필요 시). 없으면 새로 구성."""
+    cache_path = "data/rated_universe.json"
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path) as f:
+                cached = json.load(f)
+            age_h = (datetime.now() - datetime.fromisoformat(cached["timestamp"])).total_seconds() / 3600
+            if age_h < max_age_hours:
+                universe = cached.get("universe", [])
+                logger.info(f"캐시 유니버스 사용: {len(universe)}종목 ({age_h:.1f}시간 전)")
+                return universe
+        except Exception:
+            pass
+
+    return build_rated_universe()["universe"]
 
 
 if __name__ == "__main__":
-    import sys
-
-    # 테스트: 특정 종목 또는 저장된 유니버스 사용
-    if len(sys.argv) > 1:
-        tickers = [t.upper() for t in sys.argv[1:]]
-    else:
-        # rated_universe 또는 chart_scan 결과 로드
-        for path, key in [
-            ("data/rated_universe.json", "universe"),
-            ("data/chart_scan.json", "results"),
-        ]:
-            if os.path.exists(path):
-                with open(path) as f:
-                    data = json.load(f)
-                raw = data.get(key, [])
-                tickers = raw if isinstance(raw[0], str) else [r["ticker"] for r in raw]
-                logger.info(f"{path}에서 {len(tickers)}종목 로드")
-                break
-        else:
-            tickers = ["SNDK", "NVDA", "AAPL", "MSFT", "AMZN", "META"]
-            logger.info("테스트 종목 사용")
-
-    results = run_ob_scan(tickers)
-    print(format_ob_report(results))
+    result = build_rated_universe()
+    print(f"\n=== 유니버스 결과 ===")
+    for src, tickers in result["source_results"].items():
+        print(f"[{src:12s}] {len(tickers):3d}종목: {tickers[:5]}")
+    print(f"\n최종 유니버스: {result['universe_size']}종목")
+    print(f"2개+ 소스:    {len(result['multi_source_tickers'])}종목 → {result['multi_source_tickers'][:20]}")
