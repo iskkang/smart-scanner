@@ -188,6 +188,25 @@ def run_panic_scan_cmd(tickers: list = None):
         logger.error(f"패닉 스캔 실패: {e}")
 
 
+def run_ob_scan_cmd(tickers: list = None):
+    """Order Block Touch & Bounce 패턴 스캔"""
+    logger.info("OB Touch & Bounce 스캔 실행")
+    try:
+        # 유니버스 로드
+        if not tickers:
+            from universe_builder import load_or_build_universe
+            tickers = load_or_build_universe()
+
+        from ob_scanner import run_ob_scan, format_ob_report
+        results = run_ob_scan(tickers)
+
+        from notifier import send_telegram
+        report = format_ob_report(results)
+        send_telegram(report)
+    except Exception as e:
+        logger.error(f"OB 스캔 실패: {e}")
+
+
 def run_remove(ticker: str, reason: str = "수동 정리"):
     """종목 제거"""
     from position_manager import remove_position
@@ -213,9 +232,12 @@ if __name__ == "__main__":
     elif cmd == "portfolio":
         run_portfolio()
     elif cmd == "panic":
-        # 특정 종목 지정 가능: python main.py panic SNDK AMKR MU
         tickers = [t.upper() for t in sys.argv[2:]] if len(sys.argv) > 2 else None
         run_panic_scan_cmd(tickers)
+    elif cmd == "ob":
+        # OB Touch & Bounce 스캔: python main.py ob [TICKER ...]
+        tickers = [t.upper() for t in sys.argv[2:]] if len(sys.argv) > 2 else None
+        run_ob_scan_cmd(tickers)
     elif cmd == "add" and len(sys.argv) >= 4:
         run_add(sys.argv[2], float(sys.argv[3]), int(sys.argv[4]) if len(sys.argv) > 4 else 0)
     elif cmd == "remove" and len(sys.argv) >= 3:
@@ -226,8 +248,10 @@ SMART SCANNER 사용법:
   python main.py scan                        — 전체 스캔 실행
   python main.py track                       — 포지션 트래킹 + 아침 리포트
   python main.py portfolio                   — 포트폴리오 현황
-  python main.py panic                       — 패닉 셀 저가 매수 스캔 (S&P500 전체)
+  python main.py panic                       — 패닉 셀 저가 매수 스캔
   python main.py panic SNDK AMKR MU          — 특정 종목만 패닉 스캔
+  python main.py ob                           — Order Block Touch & Bounce 스캔
+  python main.py ob SNDK BKR NVDA            — 특정 종목만 OB 스캔
   python main.py add TICKER PRICE [SHARES]   — 종목 추가
   python main.py remove TICKER [REASON]      — 종목 제거
         """)
