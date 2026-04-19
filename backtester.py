@@ -647,8 +647,8 @@ def run_backtest(tickers: list) -> list:
         bt_avg = backtest.get("avg_return", 0)
         final_pass = (
             len(passed_strategies) >= 2
-            and bt_win >= 40
-            and bt_avg >= -3
+            and bt_win >= 55     # 55%+ 승률
+            and bt_avg >= 3      # 평균 +3% 이상
         )
 
         result = {
