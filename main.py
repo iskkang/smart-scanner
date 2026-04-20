@@ -166,10 +166,15 @@ def run_full_scan():
 
 
 def run_tracking():
-    """포지션 트래킹 + 알림"""
+    """포지션 트래킹 + 알림 (포지션 있을 때만 전송)"""
     logger.info("포지션 트래킹 실행")
     try:
-        from position_manager import track_all_positions
+        from position_manager import load_positions, track_all_positions
+        positions = load_positions()
+        if not positions:
+            logger.info("보유 포지션 없음 — 트래킹 스킵")
+            return
+
         summary = track_all_positions()
 
         from notifier import send_position_alerts, send_daily_report

@@ -8,8 +8,10 @@ MODULE 9: 텔레그램 리포트 (notifier.py)
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import Optional
+
+KST = timezone(timedelta(hours=9))
 
 import requests
 
@@ -70,7 +72,7 @@ def build_daily_report() -> str:
     """매일 아침 종합 리포트 빌드"""
     lines = []
     lines.append("📊 <b>SMART SCANNER DAILY REPORT</b>")
-    lines.append(f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M')} KST")
+    lines.append(f"📅 {datetime.now(KST).strftime('%Y-%m-%d %H:%M')} KST")
     lines.append("━" * 30)
 
     # ── 거시환경 ──
@@ -244,7 +246,7 @@ def build_ob_report() -> str:
 
     lines = [
         "🎯 <b>Order Block Touch &amp; Bounce 패턴</b>",
-        f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M')} KST",
+        f"📅 {datetime.now(KST).strftime('%Y-%m-%d %H:%M')} KST",
         "━" * 30,
         "",
     ]
